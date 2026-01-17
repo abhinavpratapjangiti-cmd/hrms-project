@@ -1,0 +1,167 @@
+<!-- ================= HOME DASHBOARD ================= -->
+<div class="container-fluid" id="homePage">
+
+  <!-- ================= GREETING ================= -->
+  <div class="row mb-4">
+    <div class="col-12">
+      <div class="greeting-banner">
+        <h2 id="greeting">Good day 👋</h2>
+        <p class="text-muted mb-0" id="greetingSub">
+          Hope you’re having a productive day at work.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= HOLIDAY + TIME ================= -->
+  <div class="row mb-4" id="holidayTimeRow">
+
+    <!-- Holiday -->
+    <div class="col-md-6 col-12">
+      <div
+        id="holidayCard"
+        class="card p-4 text-white h-100"
+        style="background:#ef4444"
+      >
+        <h5>Holiday</h5>
+        <h3 id="holidayText">—</h3>
+        <small id="holidayDate"></small>
+      </div>
+    </div>
+
+    <!-- Time Today -->
+    <div class="col-md-6 col-12">
+      <div class="card p-4 h-100">
+        <h6>Time Today</h6>
+
+        <div class="d-flex justify-content-between align-items-end">
+          <div>
+            <small>Worked</small>
+            <div class="metric" id="workedTime">00:00</div>
+          </div>
+
+          <div>
+            <small>
+              Break
+              <span
+                id="autoBreakBadge"
+                class="badge bg-warning text-dark ms-1 d-none"
+              >
+                Auto
+              </span>
+            </small>
+            <div class="metric" id="breakTime">00:00</div>
+          </div>
+
+          <div class="d-flex flex-column align-items-end gap-1">
+            <button
+              id="viewAttendanceBtn"
+              class="btn btn-outline-primary"
+              type="button"
+            >
+              View Attendance
+            </button>
+
+            <small
+              id="loggedInSince"
+              class="text-muted d-none"
+            >
+              Logged in since —
+            </small>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ================= MANAGER DASHBOARD ================= -->
+  <div id="managerDashboard" class="row mb-4 d-none">
+
+    <div class="col-sm-6 col-md-3">
+      <div class="card p-4 h-100 cursor-pointer"
+           onclick="openTeamAttendanceModal('ALL')">
+        <h6>👥 Team Attendance</h6>
+        <div id="teamAttendanceCount" class="display-6 fw-bold text-primary">—</div>
+        <small id="teamAttendanceMeta" class="text-muted">—</small>
+      </div>
+    </div>
+
+    <div class="col-sm-6 col-md-3">
+      <div class="card p-4 h-100">
+        <h6>📝 Pending Leaves</h6>
+        <div id="pendingLeavesCount" class="display-6 fw-bold text-warning">—</div>
+      </div>
+    </div>
+
+    <div class="col-sm-6 col-md-3">
+      <div class="card p-4 h-100">
+        <h6>⏳ Pending Timesheets</h6>
+        <div id="pendingTimesheetsCount" class="display-6 fw-bold text-info">—</div>
+      </div>
+    </div>
+
+    <div class="col-sm-6 col-md-3">
+      <div class="card p-4 h-100 cursor-pointer"
+           onclick="openTeamAttendanceModal('ON_LEAVE')">
+        <h6>🏖 Team on Leave</h6>
+        <div id="teamOnLeave" class="display-6 fw-bold text-danger">—</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ================= LEAVE BALANCE + INBOX (FIXED) ================= -->
+  <div class="row mb-4 g-4" id="leaveInboxRow">
+
+    <!-- Leave Balance -->
+    <div class="col-12 col-md-6" id="leaveBalanceCol">
+      <div class="card p-4 h-100">
+        <h6>Leave Balance</h6>
+        <div class="row text-center" id="leaveBalanceBox"></div>
+        <div class="text-center mt-3">
+          <a href="#/leaves">Apply Leave</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Inbox -->
+    <div class="col-12 col-md-6 d-none" id="homeInboxCard">
+      <div class="card p-4 h-100">
+        <h6>Inbox</h6>
+
+        <div id="inboxContainer"></div>
+
+        <div class="text-muted mb-3">
+          Pending approvals & requests
+        </div>
+
+        <a href="#/manager-leaves" class="btn btn-primary w-100">
+          Take Action
+        </a>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ================= HOLIDAYS + THOUGHT ================= -->
+  <div class="row mb-4">
+
+    <div class="col-md-6 col-12">
+      <div class="card p-4 h-100">
+        <h6>Upcoming Holidays</h6>
+        <ul id="upcomingHolidays"></ul>
+      </div>
+    </div>
+
+    <div class="col-md-6 col-12">
+      <div class="card p-4 h-100">
+        <h6>💡 Thought of the Day</h6>
+        <p id="thoughtText" class="text-muted"></p>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+<!-- ================= END HOME DASHBOARD ================= -->

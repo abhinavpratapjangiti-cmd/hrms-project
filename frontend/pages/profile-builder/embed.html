@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Professional Profile Builder</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- BUILDER ONLY CSS -->
+  <link rel="stylesheet" href="/pages/profile-builder/builder.css" />
+</head>
+
+<body>
+
+  <!-- ================= PROFILE BUILDER (CONTENT ONLY) ================= -->
+  <div class="profile-builder-wrapper">
+
+    <h2 class="builder-title">Professional Profile</h2>
+    <p class="builder-subtitle">
+      Build and maintain your structured professional profile
+    </p>
+
+    <!-- ================= SUMMARY ================= -->
+    <section class="builder-section">
+      <label for="summary">Professional Summary</label>
+      <textarea
+        id="summary"
+        rows="4"
+        placeholder="Write a short professional summary..."></textarea>
+    </section>
+
+    <!-- ================= SKILLS ================= -->
+    <section class="builder-section">
+      <label for="skills">Key Skills</label>
+      <input
+        id="skills"
+        type="text"
+        placeholder="Java, SQL, React, etc." />
+    </section>
+
+    <!-- ================= CERTIFICATIONS ================= -->
+    <section class="builder-section">
+      <label for="certifications">Certifications</label>
+      <input
+        id="certifications"
+        type="text"
+        placeholder="AWS, GCP, Azure, etc." />
+    </section>
+
+    <!-- ================= ACTIONS ================= -->
+    <div class="builder-actions">
+      <button class="btn primary" onclick="saveProfile()">
+        Save Profile
+      </button>
+    </div>
+
+  </div>
+
+  <!-- BUILDER ONLY JS -->
+  <script src="/pages/profile-builder/builder.js"></script>
+</body>
+</html>

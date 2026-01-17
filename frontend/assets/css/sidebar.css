@@ -1,0 +1,233 @@
+/* ==================================================
+   RIGHT EDIT SIDEBAR (SLIDE-IN PANEL)
+================================================== */
+
+.edit-sidebar {
+  position: fixed;
+  top: 0;
+  right: -420px;
+  width: 420px;
+  max-width: 100%;
+  height: 100dvh;
+  background: #fff;
+  box-shadow: -10px 0 30px rgba(0, 0, 0, 0.15);
+  z-index: 1050;
+  display: flex;
+  flex-direction: column;
+  transition: right 0.3s ease;
+}
+
+.edit-sidebar.open {
+  right: 0;
+}
+
+.sidebar-header {
+  padding: 16px;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sidebar-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 1049;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.sidebar-backdrop.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ==================================================
+   LEFT NAVIGATION SIDEBAR
+================================================== */
+
+.sidebar {
+  width: 240px;
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 100vh;
+  background: #1f2937;
+  z-index: 1000;
+  transition: width 0.25s ease;
+}
+
+/* ==================================================
+   BRAND
+================================================== */
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.sidebar-brand i {
+  font-size: 1.3rem;
+  color: #60a5fa;
+}
+
+.brand-text {
+  transition: opacity 0.2s ease;
+}
+
+/* ==================================================
+   SIDEBAR LINKS (FINAL ALIGNMENT FIX)
+================================================== */
+
+.sidebar a {
+  height: 44px;                 /* 🔑 FIX: lock height */
+  display: flex;
+  align-items: center;          /* vertical center */
+  gap: 12px;
+  padding: 0 16px;
+  color: #d1d5db;
+  text-decoration: none;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.sidebar a:hover,
+.sidebar a.active {
+  background: #111827;
+  color: #ffffff;
+}
+
+/* Icon box – absolute consistency */
+.sidebar a i {
+  width: 24px;
+  min-width: 24px;
+  text-align: center;
+  font-size: 1.2rem;
+  line-height: 1;               /* 🔑 FIX */
+}
+
+/* Ensure text never affects height */
+.sidebar a span {
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* ==================================================
+   MAIN CONTENT
+================================================== */
+
+.main {
+  margin-left: 240px;
+  min-height: 100vh;
+  transition: margin-left 0.25s ease;
+}
+
+/* ==================================================
+   COLLAPSED STATE
+================================================== */
+
+body.sidebar-collapsed .sidebar {
+  width: 64px;
+}
+
+body.sidebar-collapsed .main {
+  margin-left: 64px;
+}
+
+/* Perfect icon centering when collapsed */
+body.sidebar-collapsed .sidebar a {
+  justify-content: center;
+  padding: 0;
+}
+
+/* Hide labels cleanly */
+body.sidebar-collapsed .sidebar a span,
+body.sidebar-collapsed .brand-text {
+  opacity: 0;
+  width: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* ==================================================
+   MOBILE
+================================================== */
+
+@media (max-width: 768px) {
+  body.sidebar-collapsed .sidebar {
+    width: 0;
+  }
+
+  body.sidebar-collapsed .main {
+    margin-left: 0;
+  }
+}
+/* ==================================================
+   FINAL OPTICAL CENTERING FIX (CORRECT WAY)
+================================================== */
+
+/* Give sidebar equal inner space when collapsed */
+body.sidebar-collapsed .sidebar {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* Ensure links fully control centering */
+body.sidebar-collapsed .sidebar a {
+  width: 64px;              /* EXACT sidebar width */
+  justify-content: center;
+  margin: 0 auto;           /* optical centering */
+}
+
+/* Icon stays perfectly centered */
+body.sidebar-collapsed .sidebar a i {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* ==================================================
+   FINAL OPTICAL ICON CENTERING (DO NOT OVERTHINK)
+================================================== */
+
+body.sidebar-collapsed .sidebar a {
+  width: 64px;
+  justify-content: center;
+}
+
+/* Optical correction for Bootstrap Icons */
+body.sidebar-collapsed .sidebar a i {
+  transform: translateX(2px); /* 👈 THIS IS THE KEY */
+}
+/* ==================================================
+   FINAL ICON POSITION TWEAK (CENTER + SLIGHT DOWN)
+================================================== */
+
+body.sidebar-collapsed .sidebar a {
+  width: 64px;
+  height: 48px;                 /* slightly taller click area */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Optical centering for Bootstrap Icons */
+body.sidebar-collapsed .sidebar a i {
+  transform: translate(2px, 2px); /* ➜ right + down */
+}
+
+/* ==================================================
+   END SIDEBAR CSS    
+================================================== */

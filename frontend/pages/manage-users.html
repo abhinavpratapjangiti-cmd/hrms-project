@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>User Management</title>
+
+  <!-- Bootstrap -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  />
+
+  <style>
+    body {
+      background: #f6f8fb;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    /* Page Header */
+    .page-header {
+      background: #fff;
+      border-radius: 14px;
+      padding: 18px 22px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+    }
+
+    .page-header h4 {
+      margin: 0;
+      font-weight: 600;
+    }
+
+    /* Cards */
+    .card {
+      border: 0;
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+    }
+
+    .card-header {
+      background: transparent;
+      border-bottom: 1px solid #eef1f6;
+      font-weight: 600;
+      padding: 16px 20px;
+    }
+
+    .card-body {
+      padding: 20px;
+    }
+
+    /* Section Titles */
+    .section-title {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    /* Inputs */
+    .form-control,
+    .form-select {
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+
+    .form-control:focus,
+    .form-select:focus {
+      box-shadow: 0 0 0 3px rgba(59,130,246,.15);
+      border-color: #3b82f6;
+    }
+
+    /* Stats */
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      font-size: 14px;
+    }
+
+    .stat-row strong {
+      font-weight: 600;
+    }
+
+    /* Button */
+    .btn-primary {
+      border-radius: 10px;
+      padding: 10px 20px;
+      font-weight: 500;
+    }
+
+    /* =============================
+       SLIDE-IN SUCCESS TOAST
+    ============================= */
+    .toast-container {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 2000;
+    }
+
+    .app-toast {
+      min-width: 280px;
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #fff;
+      background: #0f172a;
+      box-shadow: 0 20px 40px rgba(15, 23, 42, 0.25);
+      transform: translateX(120%);
+      opacity: 0;
+      transition: all 0.4s ease;
+      margin-bottom: 12px;
+    }
+
+    .app-toast.show {
+      transform: translateX(0);
+      opacity: 1;
+    }
+
+    .app-toast.success {
+      background: linear-gradient(135deg, #16a34a, #22c55e);
+    }
+
+    .app-toast-icon {
+      font-size: 18px;
+    }
+
+    .app-toast-title {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .app-toast-msg {
+      font-size: 13px;
+      opacity: 0.9;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="container-fluid p-4">
+
+  <!-- HEADER -->
+  <div class="page-header d-flex justify-content-between align-items-center mb-4">
+    <h4>User Management</h4>
+  </div>
+
+  <div class="row g-4">
+
+    <!-- LEFT -->
+    <div class="col-xl-7">
+      <div class="card">
+        <div class="card-header">Create Employee</div>
+        <div class="card-body">
+
+          <div class="section-title">PERSONAL INFORMATION</div>
+          <div class="row g-3 mb-4">
+            <div class="col-md-6">
+              <input id="name" class="form-control" placeholder="Full name">
+            </div>
+            <div class="col-md-6">
+              <input id="email" class="form-control" placeholder="Work email">
+            </div>
+            <div class="col-md-6">
+              <input id="password" type="password" class="form-control" placeholder="Temporary password">
+            </div>
+          </div>
+
+          <div class="section-title">WORK INFORMATION</div>
+          <div class="row g-3 mb-4">
+            <div class="col-md-6">
+              <input id="department" class="form-control" placeholder="Department">
+            </div>
+            <div class="col-md-6">
+              <input id="clientName" class="form-control" placeholder="Client / Project">
+            </div>
+            <div class="col-md-6">
+              <input id="workLocation" class="form-control" placeholder="Work location">
+            </div>
+            <div class="col-md-6">
+              <select id="role" class="form-select">
+                <option value="employee">Employee</option>
+                <option value="manager">Manager</option>
+                <option value="hr">HR</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="section-title">REPORTING</div>
+          <div class="row align-items-end">
+            <div class="col-md-6">
+              <select id="createManager" class="form-select">
+                <option value="">No reporting manager</option>
+              </select>
+            </div>
+            <div class="col-md-6 text-end">
+              <button class="btn btn-primary" onclick="createUser()">
+                Create Employee
+              </button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT -->
+    <div class="col-xl-5">
+
+      <div class="card mb-3">
+        <div class="card-header">Organisation Snapshot</div>
+        <div class="card-body">
+          <div class="stat-row">
+            <span>Total Employees</span><strong id="statTotal">–</strong>
+          </div>
+          <div class="stat-row">
+            <span>Managers</span><strong id="statManagers">–</strong>
+          </div>
+          <div class="stat-row text-success">
+            <span>Active</span><strong id="statActive">–</strong>
+          </div>
+          <div class="stat-row text-danger">
+            <span>Inactive</span><strong id="statInactive">–</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-3">
+        <div class="card-header">Department Distribution</div>
+        <div class="card-body" id="deptStats">
+          <div class="text-muted">No department data</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">Recently Added</div>
+        <div class="card-body" id="recentUsers">
+          <div class="text-muted">No recent users</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- TOAST CONTAINER -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- REQUIRED SCRIPTS -->
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/auth.js"></script>
+<script src="/assets/js/pages/manage-users.js"></script>
+
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    requireAuth();
+    window.initManageUsers?.();
+  });
+
+  function showSuccessToast(title, message) {
+    const container = document.getElementById("toastContainer");
+
+    const toast = document.createElement("div");
+    toast.className = "app-toast success";
+
+    toast.innerHTML = `
+      <div class="app-toast-icon">✅</div>
+      <div>
+        <div class="app-toast-title">${title}</div>
+        <div class="app-toast-msg">${message}</div>
+      </div>
+    `;
+
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add("show"));
+
+    setTimeout(() => {
+      toast.classList.remove("show");
+      setTimeout(() => toast.remove(), 400);
+    }, 3000);
+  }
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
