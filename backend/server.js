@@ -8,6 +8,9 @@ const http = require("http");
    APP INIT
 ========================= */
 const app = express();
+app.get("/healthz", (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
 const PORT = process.env.PORT || 5000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 
