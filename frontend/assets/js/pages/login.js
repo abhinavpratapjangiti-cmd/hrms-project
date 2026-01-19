@@ -7,7 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
     e.preventDefault();
 
     const email = document.getElementById("email").value.trim();
-    const password = document.getци.getElementById("password").value.trim();
+    const password = document.getElementById("password").value.trim();
 
     try {
       const res = await fetch(`${API}/auth/login`, {
