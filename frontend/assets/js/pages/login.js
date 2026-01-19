@@ -1,4 +1,4 @@
-const API = "http://localhost:5000/api";
+const API = "https://hrms-project-4gy8.onrender.com/api";
 
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.getElementById("loginForm");
