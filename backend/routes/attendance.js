@@ -4,6 +4,9 @@ const db = require("../db");
 const { verifyToken } = require("../middleware/auth");
 const { pushNotification } = require("./wsServer");
 
+const databases = require("../lib/appwrite");
+const { Query } = require("node-appwrite");
+
 /* =========================
    HELPER: SEND NOTIFICATION
 ========================= */
@@ -27,7 +30,7 @@ async function sendNotification(userId, message) {
 }
 
 /* =========================
-   HELPER: USER → EMPLOYEE
+   HELPER: USER → EMPLOYEE (MySQL)
 ========================= */
 async function getEmployeeId(userId) {
   const [rows] = await db.query(
@@ -43,218 +46,200 @@ async function getEmployeeId(userId) {
 }
 
 /* =====================================================
-   TODAY STATUS (LIVE)
+   TODAY STATUS — Appwrite
 ===================================================== */
 router.get("/today", verifyToken, async (req, res) => {
   try {
-    const empId = await getEmployeeId(req.user.id);
+    const userId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
 
-    const [rows] = await db.query(
-      `
-      SELECT
-        clock_in,
-        break_start,
-        status,
-        total_work_minutes,
-        total_break_minutes,
-
-        CASE
-          WHEN status = 'WORKING'
-            THEN TIMESTAMPDIFF(SECOND, clock_in, NOW())
-                 - (total_break_minutes * 60)
-
-          WHEN status = 'ON_BREAK'
-            THEN TIMESTAMPDIFF(SECOND, clock_in, break_start)
-                 - (total_break_minutes * 60)
-
-          ELSE (total_work_minutes * 60)
-        END AS worked_seconds,
-
-        CASE
-          WHEN status = 'ON_BREAK' AND break_start IS NOT NULL
-            THEN (total_break_minutes * 60)
-                 + TIMESTAMPDIFF(SECOND, break_start, NOW())
-          ELSE (total_break_minutes * 60)
-        END AS break_seconds
-      FROM attendance_logs
-      WHERE employee_id = ?
-        AND log_date = CURDATE()
-      LIMIT 1
-      `,
-      [empId]
+    const result = await databases.listDocuments(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_ATT_COLLECTION_ID,
+      [
+        Query.equal("user_id", userId),
+        Query.equal("date", today),
+        Query.limit(1)
+      ]
     );
 
-    if (!rows.length || !rows[0].clock_in) {
+    if (!result.total) {
       return res.json({ status: "NOT_STARTED" });
     }
 
+    const a = result.documents[0];
+
     res.json({
-      status: rows[0].status,
-      clock_in_at: rows[0].clock_in,
-      worked_seconds: Math.max(rows[0].worked_seconds, 0),
-      break_seconds: Math.max(rows[0].break_seconds, 0)
+      status: a.status || "NOT_STARTED",
+      clock_in_at: a.clock_in || null,
+      worked_seconds: Math.max(a.worked_seconds || 0, 0),
+      break_seconds: Math.max(a.break_seconds || 0, 0)
     });
 
   } catch (err) {
-    console.error("Today status error:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Attendance today error:", err);
+    res.json({ status: "NOT_STARTED" });
   }
 });
 
 /* =====================================================
-   CLOCK IN
+   CLOCK IN — Appwrite
 ===================================================== */
 router.post("/clock-in", verifyToken, async (req, res) => {
   try {
-    const { latitude, longitude, accuracy } = req.body || {};
-    const empId = await getEmployeeId(req.user.id);
+    const userId = req.user.id;
+    const employeeId = req.user.employee_id;
+    const employeeName = req.user.name || "—";
+    const today = new Date().toISOString().slice(0, 10);
+    const docId = `${userId}_${today}`;
 
-    await db.query(
-      `
-      INSERT INTO attendance_logs (
-        employee_id, log_date, clock_in,
-        latitude, longitude, accuracy, status
-      )
-      VALUES (?, CURDATE(), NOW(), ?, ?, ?, 'WORKING')
-      ON DUPLICATE KEY UPDATE
-        clock_in = IF(clock_in IS NULL, NOW(), clock_in),
-        status = 'WORKING'
-      `,
-      [empId, latitude || null, longitude || null, accuracy || null]
-    );
+    try {
+      await databases.createDocument(
+        process.env.APPWRITE_DB_ID,
+        process.env.APPWRITE_ATT_COLLECTION_ID,
+        docId,
+        {
+          user_id: userId,
+          employee_id: employeeId,
+          employee_name: employeeName,
+          date: today,
+          status: "WORKING",
+          clock_in: new Date().toISOString(),
+          clock_out: null,
+          break_start: null,
+          worked_seconds: 0,
+          break_seconds: 0
+        }
+      );
+    } catch (err) {
+      if (err.code === 409) {
+        await databases.updateDocument(
+          process.env.APPWRITE_DB_ID,
+          process.env.APPWRITE_ATT_COLLECTION_ID,
+          docId,
+          { status: "WORKING" }
+        );
+      } else {
+        throw err;
+      }
+    }
 
-    sendNotification(req.user.id, "Clock-in successful");
+    sendNotification(userId, "Clock-in successful");
     res.json({ success: true });
 
   } catch (err) {
     console.error("Clock-in error:", err);
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ message: "Clock-in failed" });
   }
 });
 
 /* =====================================================
-   START BREAK
+   START BREAK — Appwrite
 ===================================================== */
 router.post("/start-break", verifyToken, async (req, res) => {
   try {
-    const empId = await getEmployeeId(req.user.id);
+    const userId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
+    const docId = `${userId}_${today}`;
 
-    const [result] = await db.query(
-      `
-      UPDATE attendance_logs
-      SET break_start = NOW(), status = 'ON_BREAK'
-      WHERE employee_id = ?
-        AND log_date = CURDATE()
-        AND status = 'WORKING'
-        AND break_start IS NULL
-      `,
-      [empId]
+    await databases.updateDocument(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_ATT_COLLECTION_ID,
+      docId,
+      {
+        status: "ON_BREAK",
+        break_start: new Date().toISOString()
+      }
     );
 
-    if (!result.affectedRows) {
-      return res.status(400).json({ message: "Invalid break start" });
-    }
-
     res.json({ success: true });
-
   } catch (err) {
     console.error("Start break error:", err);
-    res.status(500).json({ message: err.message });
+    res.status(400).json({ message: "Invalid break start" });
   }
 });
 
 /* =====================================================
-   END BREAK
+   END BREAK — Appwrite
 ===================================================== */
 router.post("/end-break", verifyToken, async (req, res) => {
   try {
-    const empId = await getEmployeeId(req.user.id);
+    const userId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
+    const docId = `${userId}_${today}`;
 
-    const [result] = await db.query(
-      `
-      UPDATE attendance_logs
-      SET
-        total_break_minutes =
-          total_break_minutes +
-          ROUND(TIMESTAMPDIFF(SECOND, break_start, NOW()) / 60),
-        break_start = NULL,
-        status = 'WORKING'
-      WHERE employee_id = ?
-        AND log_date = CURDATE()
-        AND status = 'ON_BREAK'
-        AND break_start IS NOT NULL
-      `,
-      [empId]
+    const doc = await databases.getDocument(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_ATT_COLLECTION_ID,
+      docId
     );
 
-    if (!result.affectedRows) {
-      return res.status(400).json({ message: "Invalid break end" });
+    if (!doc.break_start) {
+      return res.status(400).json({ message: "No active break" });
     }
 
-    res.json({ success: true });
+    const breakSeconds =
+      (Date.now() - new Date(doc.break_start).getTime()) / 1000;
 
+    await databases.updateDocument(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_ATT_COLLECTION_ID,
+      docId,
+      {
+        status: "WORKING",
+        break_start: null,
+        break_seconds: (doc.break_seconds || 0) + Math.floor(breakSeconds)
+      }
+    );
+
+    res.json({ success: true });
   } catch (err) {
     console.error("End break error:", err);
-    res.status(500).json({ message: err.message });
+    res.status(400).json({ message: "Invalid break end" });
   }
 });
 
 /* =====================================================
-   CLOCK OUT
+   CLOCK OUT — Appwrite
 ===================================================== */
 router.post("/clock-out", verifyToken, async (req, res) => {
   try {
-    const { project, task } = req.body || {};
-    if (!project || !task) {
-      return res.status(400).json({ message: "Project and task are required" });
-    }
+    const userId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
+    const docId = `${userId}_${today}`;
 
-    const empId = await getEmployeeId(req.user.id);
-
-    const [result] = await db.query(
-      `
-      UPDATE attendance_logs
-      SET
-        project = ?,
-        task = ?,
-        total_break_minutes =
-          total_break_minutes +
-          IF(
-            status = 'ON_BREAK' AND break_start IS NOT NULL,
-            ROUND(TIMESTAMPDIFF(SECOND, break_start, NOW()) / 60),
-            0
-          ),
-        break_start = NULL,
-        clock_out = NOW(),
-        total_work_minutes =
-          GREATEST(
-            TIMESTAMPDIFF(MINUTE, clock_in, NOW()) - total_break_minutes,
-            0
-          ),
-        status = 'CLOCKED_OUT'
-      WHERE employee_id = ?
-        AND log_date = CURDATE()
-        AND status IN ('WORKING','ON_BREAK')
-      `,
-      [project, task, empId]
+    const doc = await databases.getDocument(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_ATT_COLLECTION_ID,
+      docId
     );
 
-    if (!result.affectedRows) {
-      return res.status(400).json({ message: "Already clocked out" });
-    }
+    const workedSeconds =
+      (Date.now() - new Date(doc.clock_in).getTime()) / 1000 -
+      (doc.break_seconds || 0);
 
-    sendNotification(req.user.id, "Clock-out successful");
+    await databases.updateDocument(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_ATT_COLLECTION_ID,
+      docId,
+      {
+        status: "CLOCKED_OUT",
+        clock_out: new Date().toISOString(),
+        worked_seconds: Math.max(Math.floor(workedSeconds), 0)
+      }
+    );
+
+    sendNotification(userId, "Clock-out successful");
     res.json({ success: true });
 
   } catch (err) {
     console.error("Clock-out error:", err);
-    res.status(500).json({ message: err.message });
+    res.status(400).json({ message: "Already clocked out" });
   }
 });
 
 /* =====================================================
-   ATTENDANCE HISTORY (SELF)
-   🔒 CONTRACT LOCKED
+   ATTENDANCE HISTORY — MySQL (TEMP)
 ===================================================== */
 router.get("/", verifyToken, async (req, res) => {
   try {
@@ -275,87 +260,114 @@ router.get("/", verifyToken, async (req, res) => {
       [empId]
     );
 
-    res.json(Array.isArray(rows) ? rows : []);
-
+    res.json(rows || []);
   } catch (err) {
     console.error("Attendance history error:", err);
     res.status(500).json({ message: "Failed to load attendance history" });
   }
 });
+
 /* =====================================================
-   TEAM ATTENDANCE SUMMARY (SAFE CONTRACT)
-   - No side effects
-   - No dependency on clock/break logic
+   TEAM ATTENDANCE SUMMARY — Appwrite (FIXED)
 ===================================================== */
 router.get("/team/summary", verifyToken, async (req, res) => {
   try {
-    const [teamRows] = await db.query(
-      `
-      SELECT e.id
-      FROM employees e
-      JOIN employees m ON e.manager_id = m.id
-      WHERE m.user_id = ?
-        AND e.active = 1
-      `,
-      [req.user.id]
+    const managerUserId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
+
+    const team = await databases.listDocuments(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_EMP_COLLECTION_ID,
+      [
+        Query.equal("manager_user_id", managerUserId),
+        Query.equal("active", true)
+      ]
     );
 
-    const total = teamRows.length;
-
+    const total = team.total || 0;
     if (!total) {
       return res.json({ present: 0, total: 0, on_leave: 0, absent: 0 });
     }
 
-    const empIds = teamRows.map(r => r.id);
+    const employeeIds = team.documents.map(e => e.$id);
 
-    const [[leave]] = await db.query(
-      `
-      SELECT COUNT(DISTINCT employee_id) AS cnt
-      FROM leaves
-      WHERE employee_id IN (?)
-        AND status = 'Approved'
-        AND CURDATE() BETWEEN from_date AND to_date
-      `,
-      [empIds]
+    const attendance = await databases.listDocuments(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_ATT_COLLECTION_ID,
+      [
+        Query.equal("date", today),
+        Query.contains("employee_id", employeeIds)
+      ]
     );
 
-    const [[present]] = await db.query(
-      `
-      SELECT COUNT(DISTINCT employee_id) AS cnt
-      FROM attendance_logs
-      WHERE employee_id IN (?)
-        AND log_date = CURDATE()
-        AND clock_in IS NOT NULL
-      `,
-      [empIds]
+    const leaves = await databases.listDocuments(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_LEAVE_COLLECTION_ID,
+      [
+        Query.equal("status", "Approved"),
+        Query.contains("employee_id", employeeIds),
+        Query.lessThanEqual("from_date", today),
+        Query.greaterThanEqual("to_date", today)
+      ]
     );
 
-    const onLeave = leave?.cnt || 0;
-    const presentCnt = present?.cnt || 0;
-    const absent = Math.max(total - presentCnt - onLeave, 0);
+    const present = attendance.documents.filter(
+      a => a.status === "WORKING"
+    ).length;
 
-    res.json({
-      present: presentCnt,
-      total,
-      on_leave: onLeave,
-      absent
-    });
+    const on_leave = leaves.total || 0;
+    const absent = Math.max(total - present - on_leave, 0);
+
+    res.json({ present, total, on_leave, absent });
 
   } catch (err) {
     console.error("Team summary error:", err);
-    // 🔒 NEVER break UI
     res.json({ present: 0, total: 0, on_leave: 0, absent: 0 });
   }
 });
+
 /* =====================================================
-   TEAM ATTENDANCE TODAY DETAILS (SAFE STUB)
-   - Prevents dashboard cascade failures
+   TEAM ATTENDANCE TODAY DETAILS — Appwrite
 ===================================================== */
 router.get("/team/today/details", verifyToken, async (req, res) => {
-  res.json([]); // 🔒 Empty is valid and UI-safe
+  try {
+    const managerUserId = req.user.id;
+    const today = new Date().toISOString().slice(0, 10);
+
+    const team = await databases.listDocuments(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_EMP_COLLECTION_ID,
+      [
+        Query.equal("manager_user_id", managerUserId),
+        Query.equal("active", true)
+      ]
+    );
+
+    if (!team.total) return res.json([]);
+
+    const employeeIds = team.documents.map(e => e.$id);
+
+    const attendance = await databases.listDocuments(
+      process.env.APPWRITE_DB_ID,
+      process.env.APPWRITE_ATT_COLLECTION_ID,
+      [
+        Query.equal("date", today),
+        Query.contains("employee_id", employeeIds)
+      ]
+    );
+
+    const rows = attendance.documents.map(a => ({
+      employee_name: a.employee_name || "—",
+      status: a.status || "ABSENT",
+      clock_in: a.clock_in || null,
+      clock_out: a.clock_out || null
+    }));
+
+    res.json(rows);
+  } catch (err) {
+    console.error("Team today details error:", err);
+    res.json([]);
+  }
 });
 
 module.exports = router;
-/* =====================================================
-   END attendance.js
-===================================================== */

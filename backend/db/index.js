@@ -1,44 +1,38 @@
 const mysql = require("mysql2/promise");
 
 /* =====================================================
-   MySQL Connection Pool (Production-safe)
+   MySQL Connection Pool (Promise-based)
 ===================================================== */
 const db = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: Number(process.env.DB_PORT || 3306),
-
-  // ✅ REQUIRED for Railway / cloud MySQL
-  ssl: {
-    rejectUnauthorized: false
-  },
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "",
+  database: process.env.DB_NAME || "hrms_db",
+  port: process.env.DB_PORT || 3306,
 
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0,
-
-  // ✅ Prevent infinite hang
-  connectTimeout: 15000
+  queueLimit: 0
 });
 
 /* =====================================================
-   Connection Test (NON-FATAL)
+   Connection Test (Optional but Useful)
 ===================================================== */
 (async () => {
   try {
     const connection = await db.getConnection();
-    console.log("✅ MySQL Connected (pool)");
+    console.log("✅ MySQL Connected (pool ready)");
     connection.release();
   } catch (err) {
-    console.error("❌ MySQL connection failed:", err.message);
-    // ❌ DO NOT exit in production (Render will restart loop)
+    console.error("❌ MySQL connection failed:", err);
+    process.exit(1);
   }
 })();
 
+/* =====================================================
+   Export Pool
+===================================================== */
 module.exports = db;
-
 /* ======================================================
-   END db/index.js
+    END db/index.js       
 ====================================================== */
