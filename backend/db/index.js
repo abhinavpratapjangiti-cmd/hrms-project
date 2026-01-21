@@ -1,38 +1,56 @@
 const mysql = require("mysql2/promise");
 
 /* =====================================================
-   MySQL Connection Pool (Promise-based)
+   MySQL Connection Pool (OPTIONAL / NON-BLOCKING)
+   - App must NOT crash if MySQL is unavailable
 ===================================================== */
-const db = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "hrms_db",
-  port: process.env.DB_PORT || 3306,
 
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+let pool = null;
 
-/* =====================================================
-   Connection Test (Optional but Useful)
-===================================================== */
-(async () => {
+async function initMySQL() {
   try {
-    const connection = await db.getConnection();
-    console.log("✅ MySQL Connected (pool ready)");
-    connection.release();
+    pool = mysql.createPool({
+      host: process.env.DB_HOST || "localhost",
+      user: process.env.DB_USER || "root",
+      password: process.env.DB_PASSWORD || "",
+      database: process.env.DB_NAME || "hrms_db",
+      port: Number(process.env.DB_PORT || 3306),
+
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0
+    });
+
+    const conn = await pool.getConnection();
+    conn.release();
+
+    console.log("✅ MySQL connected (optional pool ready)");
   } catch (err) {
-    console.error("❌ MySQL connection failed:", err);
-    process.exit(1);
+    console.warn("⚠️ MySQL unavailable. Continuing without DB.");
+    pool = null; // 👈 critical
   }
-})();
+}
+
+// 🔁 Initialize once (non-blocking)
+initMySQL();
 
 /* =====================================================
-   Export Pool
+   SAFE QUERY WRAPPER
 ===================================================== */
-module.exports = db;
-/* ======================================================
-    END db/index.js       
-====================================================== */
+async function query(...args) {
+  if (!pool) {
+    throw new Error("DB_NOT_AVAILABLE");
+  }
+  return pool.query(...args);
+}
+
+/* =====================================================
+   EXPORT
+===================================================== */
+module.exports = {
+  query
+};
+
+/* =====================================================
+   END db/index.js
+===================================================== */
