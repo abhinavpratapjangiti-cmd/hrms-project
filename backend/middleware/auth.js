@@ -3,18 +3,18 @@ const db = require("../db");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// 🔐 FAIL FAST
+// 🔐 FAIL FAST — never allow silent fallback
 if (!JWT_SECRET) {
   throw new Error("JWT_SECRET is not defined in environment variables");
 }
 
 /* =====================================================
-   JWT VERIFICATION MIDDLEWARE (SINGLE SOURCE OF TRUTH)
+   JWT VERIFICATION MIDDLEWARE
+   - Single source of truth
+   - MySQL-backed token version check
 ===================================================== */
 async function verifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
-
-  console.log("AUTH HEADER:", authHeader);
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ message: "Unauthorized" });
@@ -23,6 +23,7 @@ async function verifyToken(req, res, next) {
   const token = authHeader.split(" ")[1];
 
   try {
+    // ✅ Verify JWT signature
     const decoded = jwt.verify(token, JWT_SECRET);
 
     /* ================= TOKEN VERSION CHECK ================= */
@@ -35,13 +36,15 @@ async function verifyToken(req, res, next) {
       return res.status(401).json({ message: "Invalid session" });
     }
 
-    if ((decoded.token_version || 0) !== (rows[0].token_version || 0)) {
+    const currentVersion = rows[0].token_version || 0;
+
+    if ((decoded.token_version || 0) !== currentVersion) {
       return res.status(401).json({
         message: "Session expired. Please login again."
       });
     }
 
-    // ✅ Canonical user object
+    // ✅ Attach canonical user object
     req.user = {
       id: decoded.id,
       email: decoded.email,
@@ -49,7 +52,7 @@ async function verifyToken(req, res, next) {
       employee_id: decoded.employee_id || null
     };
 
-    // 🔄 Presence update (non-blocking)
+    /* ================= PRESENCE UPDATE (NON-BLOCKING) ================= */
     db.query(
       `
       UPDATE users
@@ -57,7 +60,9 @@ async function verifyToken(req, res, next) {
       WHERE id = ?
       `,
       [decoded.id]
-    ).catch(() => {});
+    ).catch(() => {
+      // deliberately ignored
+    });
 
     next();
   } catch (err) {
