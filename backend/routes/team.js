@@ -1,156 +1,155 @@
-const express = require("express");
-const router = express.Router();
-const db = require("../db");
-const { verifyToken } = require("../middleware/auth");
+const sdk = require("node-appwrite");
 
-/**
- * GET /api/team/my
- *
- * ROLE BEHAVIOR:
- * - Admin / HR  → Full organization
- * - Manager     → Self + all direct & indirect reports
- * - Employee    → Self + direct manager (if exists)
- *
- * REAL-TIME PRESENCE:
- * - online     → last_seen within last 5 minutes AND is_logged_in = 1
- * - last_seen  → users.last_seen
- */
+module.exports = async ({ req, res, log, error }) => {
+  const client = new sdk.Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setJWT(req.headers["x-appwrite-jwt"]);
 
-router.get("/my", verifyToken, async (req, res) => {
-  const userId = req.user.id;
-  const role = String(req.user.role || "").toLowerCase();
+  const users = new sdk.Users(client);
+  const databases = new sdk.Databases(client);
 
+  const DB_ID = process.env.APPWRITE_DB_ID;
+  const EMP_COL = process.env.EMP_COLLECTION_ID;
+  const PRES_COL = process.env.PRESENCE_COLLECTION_ID;
+
+  /* =========================
+     AUTH
+  ========================= */
+  let me;
+  try {
+    me = await users.get("me");
+  } catch {
+    return res.json({ message: "Unauthorized" }, 401);
+  }
+
+  const userId = me.$id;
+  const role = String(me.prefs?.role || "").toLowerCase();
   const HR_ROLES = new Set(["hr", "hr_admin", "people_ops"]);
 
   try {
     /* =========================
        EMPLOYEE CONTEXT
     ========================= */
-    const [empRows] = await db.query(
-      `SELECT id, manager_id FROM employees WHERE user_id = ? LIMIT 1`,
-      [userId]
+    const empRes = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [sdk.Query.equal("user_id", userId)]
     );
 
-    if (!empRows.length) {
-      return res.status(404).json({ message: "Employee not found" });
+    const meEmp = empRes.documents[0];
+    if (!meEmp) {
+      return res.json({ message: "Employee not found" }, 404);
     }
 
-    const empId = empRows[0].id;
-    const managerId = empRows[0].manager_id;
+    const empId = meEmp.employee_id;
+    const managerId = meEmp.manager_id;
 
     /* =========================
-       BASE SELECT (REAL-TIME)
+       LOAD ALL ACTIVE EMPLOYEES
     ========================= */
-    const BASE_SELECT = `
-      SELECT
-        e.id,
-        e.name,
-        e.email,
-        u.role,
-        e.department,
-        e.client_name,
-        e.work_location,
-        e.active,
-        e.manager_id,
-        m.name AS manager_name,
-
-        u.last_seen AS last_seen,
-        CASE
-          WHEN u.is_logged_in = 1
-           AND u.last_seen IS NOT NULL
-           AND u.last_seen >= NOW() - INTERVAL 5 MINUTE
-          THEN 1 ELSE 0
-        END AS online
-
-      FROM employees e
-      JOIN users u ON u.id = e.user_id
-      LEFT JOIN employees m ON m.id = e.manager_id
-    `;
+    const empAll = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [
+        sdk.Query.equal("active", true),
+        sdk.Query.limit(500)
+      ]
+    );
 
     /* =========================
-       ADMIN / HR → FULL ORG
+       LOAD PRESENCE
     ========================= */
+    const pres = await databases.listDocuments(
+      DB_ID,
+      PRES_COL,
+      [sdk.Query.limit(500)]
+    );
+
+    const presenceMap = Object.fromEntries(
+      pres.documents.map(p => [p.user_id, p])
+    );
+
+    /* =========================
+       ONLINE COMPUTATION
+    ========================= */
+    const FIVE_MIN = 5 * 60 * 1000;
+    const now = Date.now();
+
+    const withPresence = empAll.documents.map(e => {
+      const p = presenceMap[e.user_id];
+      const lastSeen = p?.last_seen || null;
+
+      const online =
+        p?.is_logged_in === true &&
+        lastSeen &&
+        now - new Date(lastSeen).getTime() <= FIVE_MIN;
+
+      return {
+        ...e,
+        last_seen: lastSeen,
+        online: online ? 1 : 0
+      };
+    });
+
+    /* =========================
+       ROLE FILTERING
+    ========================= */
+
+    let visible = [];
+
+    // Admin / HR → full org
     if (role === "admin" || HR_ROLES.has(role)) {
-      const [rows] = await db.query(`
-        ${BASE_SELECT}
-        WHERE e.active = 1
-        ORDER BY
-          CASE u.role
-            WHEN 'hr' THEN 1
-            WHEN 'manager' THEN 2
-            WHEN 'employee' THEN 3
-            ELSE 4
-          END,
-          e.name
-      `);
-
-      return res.json(rows);
+      visible = withPresence;
     }
 
-    /* =========================
-       MANAGER → FULL SUBTREE
-    ========================= */
-    if (role === "manager") {
-      const [rows] = await db.query(
-        `
-        WITH RECURSIVE team_tree AS (
-          SELECT id, manager_id
-          FROM employees
-          WHERE id = ? AND active = 1
+    // Manager → self + subtree
+    else if (role === "manager") {
+      const subtree = new Set([empId]);
 
-          UNION ALL
+      let added;
+      do {
+        added = false;
+        for (const e of withPresence) {
+          if (e.manager_id && subtree.has(e.manager_id) && !subtree.has(e.employee_id)) {
+            subtree.add(e.employee_id);
+            added = true;
+          }
+        }
+      } while (added);
 
-          SELECT e.id, e.manager_id
-          FROM employees e
-          JOIN team_tree t ON e.manager_id = t.id
-          WHERE e.active = 1
-        )
-        ${BASE_SELECT}
-        JOIN team_tree tt ON tt.id = e.id
-        ORDER BY
-          CASE u.role
-            WHEN 'manager' THEN 1
-            WHEN 'employee' THEN 2
-            ELSE 3
-          END,
-          e.name
-        `,
-        [empId]
+      visible = withPresence.filter(e => subtree.has(e.employee_id));
+    }
+
+    // Employee → self + manager
+    else {
+      visible = withPresence.filter(
+        e =>
+          e.employee_id === empId ||
+          (managerId && e.employee_id === managerId)
       );
-
-      return res.json(rows);
     }
 
     /* =========================
-       EMPLOYEE → SELF + MANAGER
+       SORTING
     ========================= */
-    const [rows] = await db.query(
-      `
-      ${BASE_SELECT}
-      WHERE e.active = 1
-        AND (
-          e.id = ?
-          OR ( ? IS NOT NULL AND e.id = ? )
-        )
-      ORDER BY
-        CASE u.role
-          WHEN 'manager' THEN 1
-          ELSE 2
-        END,
-        e.name
-      `,
-      [empId, managerId, managerId]
-    );
+    const roleOrder = {
+      hr: 1,
+      manager: 2,
+      employee: 3
+    };
 
-    return res.json(rows);
+    visible.sort((a, b) => {
+      const rA = roleOrder[a.role] || 99;
+      const rB = roleOrder[b.role] || 99;
+      if (rA !== rB) return rA - rB;
+      return a.name.localeCompare(b.name);
+    });
+
+    return res.json(visible);
 
   } catch (err) {
-    console.error("My Team API error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    error(err);
+    return res.json({ message: "Internal server error" }, 500);
   }
-});
-
-module.exports = router;
-/* =========================
-   END routes/team.js
-========================= */
+};

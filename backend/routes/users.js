@@ -1,8 +1,9 @@
 const express = require("express");
 const router = express.Router();
-const db = require("../db");
 const bcrypt = require("bcryptjs");
 const { verifyToken } = require("../middleware/auth");
+const databases = require("../lib/appwrite");
+const { Query } = require("node-appwrite");
 const { pushNotification } = require("./wsServer");
 
 /* =========================
@@ -11,13 +12,16 @@ const { pushNotification } = require("./wsServer");
 const ALLOWED_ROLES = ["employee", "manager", "hr", "admin"];
 const USER_CREATORS = ["admin", "hr"];
 
+const DB_ID = process.env.APPWRITE_DB_ID;
+const EMP_COL = process.env.APPWRITE_EMP_COLLECTION_ID;
+const NOTIF_COL = process.env.APPWRITE_NOTIFICATION_COLLECTION_ID;
+
 /* =========================
    CREATE USER (ADMIN + HR)
 ========================= */
 router.post("/", verifyToken, async (req, res) => {
   try {
-    const requesterRole = (req.user.role || "").toLowerCase();
-    if (!USER_CREATORS.includes(requesterRole)) {
+    if (!USER_CREATORS.includes(req.user.role)) {
       return res.status(403).json({ message: "Admin / HR only" });
     }
 
@@ -30,7 +34,7 @@ router.post("/", verifyToken, async (req, res) => {
       client_name,
       work_location,
       designation,
-      manager_id
+      manager_user_id
     } = req.body;
 
     if (!name || !email || !password || !role) {
@@ -44,122 +48,84 @@ router.post("/", verifyToken, async (req, res) => {
     }
 
     /* =========================
-       1️⃣ CHECK DUPLICATE USER
+       1️⃣ CHECK DUPLICATE EMAIL
     ========================= */
-    const [existing] = await db.query(
-      "SELECT id FROM users WHERE email = ?",
-      [email]
+    const existing = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [Query.equal("email", email)]
     );
 
-    if (existing.length) {
+    if (existing.total > 0) {
       return res.status(409).json({ message: "User already exists" });
     }
 
     /* =========================
        2️⃣ HASH PASSWORD
+       (stored only for future auth migration)
     ========================= */
     const hashedPassword = await bcrypt.hash(password, 10);
 
     /* =========================
-       3️⃣ INSERT USER
+       3️⃣ CREATE EMPLOYEE
     ========================= */
-    const [userResult] = await db.query(
-      `
-      INSERT INTO users (name, email, password, role)
-      VALUES (?, ?, ?, ?)
-      `,
-      [name, email, hashedPassword, role.toLowerCase()]
-    );
-
-    const userId = userResult.insertId;
-
-    /* =========================
-       4️⃣ INSERT EMPLOYEE
-    ========================= */
-    await db.query(
-      `
-      INSERT INTO employees (
-        user_id, name, email, department,
-        client_name, work_location, designation,
-        manager_id, active
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-      `,
-      [
-        userId,
+    const emp = await databases.createDocument(
+      DB_ID,
+      EMP_COL,
+      "unique()",
+      {
+        user_id: Date.now(), // temporary numeric ID
         name,
         email,
-        department || null,
-        client_name || null,
-        work_location || null,
-        designation || null,
-        manager_id || null
-      ]
+        password: hashedPassword,
+        role: role.toLowerCase(),
+        department: department || null,
+        client_name: client_name || null,
+        work_location: work_location || null,
+        designation: designation || null,
+        manager_user_id: manager_user_id || null,
+        active: true,
+        created_at: new Date().toISOString()
+      }
     );
 
     /* =========================
-       🔔 NON-BLOCKING NOTIFICATIONS
+       🔔 NOTIFICATIONS
     ========================= */
     try {
-      // Notify HR users
-      const [hrs] = await db.query(
-        "SELECT id FROM users WHERE role = 'hr'"
+      // Notify HRs
+      const hrs = await databases.listDocuments(
+        DB_ID,
+        EMP_COL,
+        [Query.equal("role", "hr")]
       );
 
-      for (const hr of hrs) {
-        const [n] = await db.query(
-          `
-          INSERT INTO notifications (user_id, type, message, is_read)
-          VALUES (?, 'user', ?, 0)
-          `,
-          [hr.id, `New employee ${name} was added`]
-        );
-
-        pushNotification(hr.id, {
-          id: n.insertId,
+      for (const hr of hrs.documents) {
+        pushNotification(hr.user_id, {
+          id: Date.now(),
           type: "user",
           message: `New employee ${name} was added`,
           created_at: new Date()
         });
       }
 
-      // Notify reporting manager
-      if (Number(manager_id)) {
-        const [rows] = await db.query(
-          "SELECT user_id FROM employees WHERE id = ?",
-          [manager_id]
-        );
-
-        if (rows[0]?.user_id) {
-          const managerUserId = rows[0].user_id;
-
-          const [n] = await db.query(
-            `
-            INSERT INTO notifications (user_id, type, message, is_read)
-            VALUES (?, 'user', ?, 0)
-            `,
-            [managerUserId, `${name} has been added to your team`]
-          );
-
-          pushNotification(managerUserId, {
-            id: n.insertId,
-            type: "user",
-            message: `${name} has been added to your team`,
-            created_at: new Date()
-          });
-        }
+      // Notify manager
+      if (manager_user_id) {
+        pushNotification(manager_user_id, {
+          id: Date.now(),
+          type: "user",
+          message: `${name} has been added to your team`,
+          created_at: new Date()
+        });
       }
-    } catch (notifyErr) {
-      console.warn("Notification skipped:", notifyErr.message);
+    } catch (e) {
+      console.warn("Notification skipped:", e.message);
     }
 
-    /* =========================
-       5️⃣ RESPONSE
-    ========================= */
     res.status(201).json({ message: "User created successfully" });
 
   } catch (err) {
-    console.error("CREATE USER ERROR:", err);
+    console.error("CREATE USER ERROR:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -169,39 +135,26 @@ router.post("/", verifyToken, async (req, res) => {
 ========================= */
 router.get("/", verifyToken, async (req, res) => {
   try {
-    const requesterRole = (req.user.role || "").toLowerCase();
-    if (!USER_CREATORS.includes(requesterRole)) {
+    if (!USER_CREATORS.includes(req.user.role)) {
       return res.status(403).json({ message: "Admin / HR only" });
     }
 
-    const { role } = req.query;
-
-    let sql = `
-      SELECT
-        e.id,
-        e.name,
-        e.email,
-        u.role,
-        e.department,
-        e.active
-      FROM employees e
-      JOIN users u ON u.id = e.user_id
-    `;
-    const params = [];
-
-    if (role) {
-      sql += " WHERE u.role = ?";
-      params.push(role.toLowerCase());
+    const queries = [];
+    if (req.query.role) {
+      queries.push(Query.equal("role", req.query.role.toLowerCase()));
     }
 
-    sql += " ORDER BY e.name";
+    const result = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      queries
+    );
 
-    const [rows] = await db.query(sql, params);
-    res.json(rows);
+    res.json(result.documents);
 
   } catch (err) {
-    console.error("LIST USERS ERROR:", err);
-    res.status(500).json({ message: "DB error" });
+    console.error("LIST USERS ERROR:", err.message);
+    res.status(500).json([]);
   }
 });
 
@@ -210,22 +163,18 @@ router.get("/", verifyToken, async (req, res) => {
 ========================= */
 router.get("/stats", verifyToken, async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `
-      SELECT
-        COUNT(*) AS total,
-        SUM(u.role = 'manager') AS managers,
-        SUM(e.active = 1) AS active,
-        SUM(e.active = 0) AS inactive
-      FROM employees e
-      JOIN users u ON u.id = e.user_id
-      `
-    );
+    const result = await databases.listDocuments(DB_ID, EMP_COL);
 
-    res.json(rows[0]);
-  } catch (err) {
-    console.error("STATS ERROR:", err);
-    res.status(500).json({ message: "DB error" });
+    const stats = {
+      total: result.total,
+      managers: result.documents.filter(e => e.role === "manager").length,
+      active: result.documents.filter(e => e.active).length,
+      inactive: result.documents.filter(e => !e.active).length
+    };
+
+    res.json(stats);
+  } catch {
+    res.json({ total: 0, managers: 0, active: 0, inactive: 0 });
   }
 });
 
@@ -234,20 +183,21 @@ router.get("/stats", verifyToken, async (req, res) => {
 ========================= */
 router.get("/departments", verifyToken, async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `
-      SELECT department, COUNT(*) AS count
-      FROM employees
-      WHERE department IS NOT NULL AND department != ''
-      GROUP BY department
-      ORDER BY count DESC
-      `
-    );
+    const result = await databases.listDocuments(DB_ID, EMP_COL);
 
-    res.json(rows);
-  } catch (err) {
-    console.error("DEPARTMENT ERROR:", err);
-    res.status(500).json({ message: "DB error" });
+    const map = {};
+    for (const e of result.documents) {
+      if (!e.department) continue;
+      map[e.department] = (map[e.department] || 0) + 1;
+    }
+
+    res.json(
+      Object.entries(map)
+        .map(([department, count]) => ({ department, count }))
+        .sort((a, b) => b.count - a.count)
+    );
+  } catch {
+    res.json([]);
   }
 });
 
@@ -256,24 +206,25 @@ router.get("/departments", verifyToken, async (req, res) => {
 ========================= */
 router.get("/recent", verifyToken, async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `
-      SELECT e.name, u.role
-      FROM employees e
-      JOIN users u ON u.id = e.user_id
-      ORDER BY e.id DESC
-      LIMIT 5
-      `
+    const result = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [Query.orderDesc("created_at"), Query.limit(5)]
     );
 
-    res.json(rows);
-  } catch (err) {
-    console.error("RECENT USERS ERROR:", err);
-    res.status(500).json({ message: "DB error" });
+    res.json(
+      result.documents.map(e => ({
+        name: e.name,
+        role: e.role
+      }))
+    );
+  } catch {
+    res.json([]);
   }
 });
 
 module.exports = router;
+
 /* =========================
-   END routes/users.js
-========================= */  
+   END routes/users.js (APPWRITE)
+========================= */

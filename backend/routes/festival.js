@@ -1,66 +1,94 @@
 const express = require("express");
 const router = express.Router();
-const db = require("../db");
 const { verifyToken } = require("../middleware/auth");
+const databases = require("../lib/appwrite");
+const { Query } = require("node-appwrite");
 
-/* =========================
-   SHOULD SHOW FESTIVAL
-========================= */
+const DB_ID = process.env.APPWRITE_DB_ID;
+const FESTIVAL_COL = process.env.APPWRITE_FESTIVAL_COLLECTION_ID;
+
+/* =====================================================
+   SHOULD SHOW FESTIVAL (APPWRITE)
+   GET /api/festival/should-show?festival=diwali
+===================================================== */
 router.get("/should-show", verifyToken, async (req, res) => {
   try {
     const { festival } = req.query;
     const year = new Date().getFullYear();
 
     if (!festival) {
-      return res.status(400).json({ show: false });
+      return res.json({ show: false });
     }
 
-    const [rows] = await db.query(
-      `
-      SELECT 1
-      FROM festival_views
-      WHERE user_id = ? AND festival = ? AND year = ?
-      `,
-      [req.user.id, festival, year]
+    const result = await databases.listDocuments(
+      DB_ID,
+      FESTIVAL_COL,
+      [
+        Query.equal("user_id", req.user.id),
+        Query.equal("festival", festival),
+        Query.equal("year", year),
+        Query.limit(1)
+      ]
     );
 
-    res.json({ show: rows.length === 0 });
+    // ✅ Same logic as MySQL
+    res.json({ show: result.total === 0 });
 
   } catch (err) {
-    console.error("Festival should-show error:", err);
-    res.status(500).json({ show: false });
+    console.error("Festival should-show error:", err.message);
+    res.json({ show: false }); // UI-safe
   }
 });
 
-/* =========================
-   MARK FESTIVAL VIEWED
-========================= */
+/* =====================================================
+   MARK FESTIVAL AS VIEWED (APPWRITE)
+   POST /api/festival/mark-viewed
+===================================================== */
 router.post("/mark-viewed", verifyToken, async (req, res) => {
   try {
     const { festival } = req.body;
     const year = new Date().getFullYear();
 
     if (!festival) {
-      return res.status(400).json({ success: false });
+      return res.json({ success: false });
     }
 
-    await db.query(
-      `
-      INSERT IGNORE INTO festival_views (user_id, festival, year)
-      VALUES (?, ?, ?)
-      `,
-      [req.user.id, festival, year]
+    // 🔒 Idempotent insert (check first)
+    const existing = await databases.listDocuments(
+      DB_ID,
+      FESTIVAL_COL,
+      [
+        Query.equal("user_id", req.user.id),
+        Query.equal("festival", festival),
+        Query.equal("year", year),
+        Query.limit(1)
+      ]
     );
+
+    if (existing.total === 0) {
+      await databases.createDocument(
+        DB_ID,
+        FESTIVAL_COL,
+        "unique()",
+        {
+          user_id: req.user.id,
+          festival,
+          year,
+          created_at: new Date().toISOString()
+        }
+      );
+    }
 
     res.json({ success: true });
 
   } catch (err) {
-    console.error("Festival mark-viewed error:", err);
-    res.status(500).json({ success: false });
+    console.error("Festival mark-viewed error:", err.message);
+    res.json({ success: false });
   }
 });
 
 module.exports = router;
-/* ======================================================       
-    END routes/festival.js       
-====================================================== */
+
+/* =====================================================
+   END routes/festival.js (APPWRITE)
+===================================================== */

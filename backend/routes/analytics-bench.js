@@ -1,12 +1,12 @@
 const express = require("express");
 const router = express.Router();
-const  { verifyToken }= require("../middleware/auth");
+const { verifyToken } = require("../middleware/auth");
 
 const BenchAnalyticsService =
   require("../services/benchAnalytics.service");
 
 /* =====================================================
-   AUTH HELPER
+   AUTH HELPER (MIDDLEWARE)
 ===================================================== */
 function allowHRAdmin(req, res, next) {
   const role = String(req.user?.role || "").toLowerCase();
@@ -22,22 +22,25 @@ function allowHRAdmin(req, res, next) {
    BENCH BURN + TREND
    GET /api/analytics/bench/burn-trend
 ===================================================== */
-router.get("/burn-trend", verifyToken, async (req, res) => {
-  try {
-    if (!allowHRAdmin(req, res)) return;
+router.get(
+  "/burn-trend",
+  verifyToken,
+  allowHRAdmin,
+  async (req, res) => {
+    try {
+      const trend = await BenchAnalyticsService.getBenchBurnTrend(6);
 
-    const trend = await BenchAnalyticsService.getBenchBurnTrend(6);
+      const current = trend.length
+        ? trend[trend.length - 1]
+        : { month: null, bench_cost: 0 };
 
-    const current = trend.length
-      ? trend[trend.length - 1]
-      : { month: null, bench_cost: 0 };
-
-    res.json({ current, trend });
-  } catch (err) {
-    console.error("Bench burn trend failed:", err);
-    res.status(500).json({ message: "Bench burn trend failed" });
+      res.json({ current, trend });
+    } catch (err) {
+      console.error("Bench burn trend failed:", err);
+      res.status(500).json({ message: "Bench burn trend failed" });
+    }
   }
-});
+);
 
 /* =====================================================
    BENCH SUMMARY
@@ -48,8 +51,13 @@ router.get(
   verifyToken,
   allowHRAdmin,
   async (req, res) => {
-    const data = await BenchAnalyticsService.getBenchSummary();
-    res.json(data);
+    try {
+      const data = await BenchAnalyticsService.getBenchSummary();
+      res.json(data);
+    } catch (err) {
+      console.error("Bench summary failed:", err);
+      res.status(500).json({ message: "Bench summary failed" });
+    }
   }
 );
 
@@ -57,32 +65,38 @@ router.get(
    BENCH AGING BUCKETS
    GET /api/analytics/bench/aging
 ===================================================== */
-router.get("/aging", verifyToken, async (req, res) => {
-  try {
-    if (!allowHRAdmin(req, res)) return;
-
-    const data = await BenchAnalyticsService.getBenchAgingBuckets();
-    res.json(data);
-  } catch (err) {
-    console.error("Bench aging failed:", err);
-    res.status(500).json({ message: "Bench aging failed" });
+router.get(
+  "/aging",
+  verifyToken,
+  allowHRAdmin,
+  async (req, res) => {
+    try {
+      const data = await BenchAnalyticsService.getBenchAgingBuckets();
+      res.json(data);
+    } catch (err) {
+      console.error("Bench aging failed:", err);
+      res.status(500).json({ message: "Bench aging failed" });
+    }
   }
-});
+);
 
 /* =====================================================
    BENCH EMPLOYEE LIST (DRILL DOWN)
    GET /api/analytics/bench/list
 ===================================================== */
-router.get("/list", verifyToken, async (req, res) => {
-  try {
-    if (!allowHRAdmin(req, res)) return;
-
-    const list = await BenchAnalyticsService.getBenchEmployeesList();
-    res.json(list);
-  } catch (err) {
-    console.error("Bench list failed:", err);
-    res.status(500).json({ message: "Bench list failed" });
+router.get(
+  "/list",
+  verifyToken,
+  allowHRAdmin,
+  async (req, res) => {
+    try {
+      const list = await BenchAnalyticsService.getBenchEmployeesList();
+      res.json(list);
+    } catch (err) {
+      console.error("Bench list failed:", err);
+      res.status(500).json({ message: "Bench list failed" });
+    }
   }
-});
+);
 
 module.exports = router;

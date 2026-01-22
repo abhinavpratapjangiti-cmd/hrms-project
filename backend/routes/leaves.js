@@ -1,58 +1,33 @@
 const express = require("express");
 const router = express.Router();
-const db = require("../db");
 const { verifyToken } = require("../middleware/auth");
+const databases = require("../lib/appwrite");
+const { Query } = require("node-appwrite");
 const { pushNotification } = require("./wsServer");
 
-/* =========================
-   🔔 NOTIFICATION HELPER
-========================= */
-async function createNotification(userId, type, message) {
-  try {
-    const [result] = await db.query(
-      `
-      INSERT INTO notifications (user_id, type, message, is_read)
-      VALUES (?, ?, ?, 0)
-      `,
-      [userId, type, message]
-    );
+const DB_ID = process.env.APPWRITE_DB_ID;
+const LEAVE_COL = process.env.APPWRITE_LEAVE_COLLECTION_ID;
 
-    // 🔔 realtime push (non-blocking)
+/* =====================================================
+   🔔 REALTIME NOTIFICATION (NO DB)
+===================================================== */
+function notify(userId, type, message) {
+  if (!userId) return;
+  try {
     pushNotification(userId, {
-      id: result.insertId,
+      id: Date.now(),
       type,
       message,
-      created_at: new Date()
+      created_at: new Date().toISOString()
     });
   } catch (err) {
-    console.error("Notification create failed:", err);
+    console.error("Notification error:", err.message);
   }
 }
 
-/* =========================
-   HELPER: USER → EMPLOYEE
-========================= */
-async function getEmployee(userId) {
-  const [rows] = await db.query(
-    `
-    SELECT id, name, manager_id, user_id
-    FROM employees
-    WHERE user_id = ?
-    LIMIT 1
-    `,
-    [userId]
-  );
-
-  if (!rows.length) {
-    throw new Error("EMPLOYEE_NOT_FOUND");
-  }
-
-  return rows[0];
-}
-
-/* =========================
+/* =====================================================
    APPLY LEAVE
-========================= */
+===================================================== */
 router.post("/apply", verifyToken, async (req, res) => {
   try {
     const { from_date, to_date, leave_type, reason } = req.body;
@@ -70,53 +45,50 @@ router.post("/apply", verifyToken, async (req, res) => {
       return res.status(400).json({ message: "Invalid date range" });
     }
 
-    const emp = await getEmployee(req.user.id);
-
-    /* ✅ overlap protection */
-    const [overlap] = await db.query(
-      `
-      SELECT 1
-      FROM leaves
-      WHERE employee_id = ?
-        AND status IN ('PENDING','APPROVED')
-        AND from_date <= ?
-        AND to_date >= ?
-      LIMIT 1
-      `,
-      [emp.id, to_date, from_date]
+    /* 🔒 Overlap protection (PENDING + APPROVED) */
+    const existing = await databases.listDocuments(
+      DB_ID,
+      LEAVE_COL,
+      [
+        Query.equal("employee_id", req.user.employee_id),
+        Query.lessThanEqual("from_date", to_date),
+        Query.greaterThanEqual("to_date", from_date)
+      ]
     );
 
-    if (overlap.length) {
+    const overlap = existing.documents.some(d =>
+      ["PENDING", "APPROVED"].includes(d.status)
+    );
+
+    if (overlap) {
       return res.status(400).json({
         message: "Leave already applied for selected dates"
       });
     }
 
-    /* ✅ insert leave */
-    await db.query(
-      `
-      INSERT INTO leaves
-        (employee_id, from_date, to_date, leave_type, reason, status)
-      VALUES (?, ?, ?, ?, ?, 'PENDING')
-      `,
-      [emp.id, from_date, to_date, leave_type, reason || null]
+    const doc = await databases.createDocument(
+      DB_ID,
+      LEAVE_COL,
+      "unique()",
+      {
+        employee_id: req.user.employee_id,
+        employee_user_id: req.user.id,
+        employee_name: req.user.email,
+        manager_user_id: req.user.manager_user_id || null,
+        from_date,
+        to_date,
+        leave_type,
+        reason: reason || null,
+        status: "PENDING",
+        created_at: new Date().toISOString()
+      }
     );
 
-    /* 🔔 notify manager */
-    if (emp.manager_id) {
-      const [mgr] = await db.query(
-        "SELECT user_id FROM employees WHERE id = ?",
-        [emp.manager_id]
-      );
-
-      if (mgr.length) {
-        createNotification(
-          mgr[0].user_id,
-          "leave",
-          `${emp.name} applied for leave`
-        );
-      }
-    }
+    notify(
+      doc.manager_user_id,
+      "leave",
+      "New leave request submitted"
+    );
 
     res.json({
       status: "success",
@@ -124,46 +96,117 @@ router.post("/apply", verifyToken, async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Apply leave error:", err);
+    console.error("Apply leave error:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });
 
-/* =========================
-   HR – ALL PENDING LEAVES
-========================= */
-router.get("/pending", verifyToken, async (req, res) => {
-  if (!["hr", "admin"].includes(req.user.role)) {
+/* =====================================================
+   LEAVE BALANCE
+===================================================== */
+router.get("/balance", verifyToken, async (req, res) => {
+  try {
+    const QUOTA = { CL: 12, SL: 10, PL: 15 };
+
+    const result = await databases.listDocuments(
+      DB_ID,
+      LEAVE_COL,
+      [
+        Query.equal("employee_id", req.user.employee_id),
+        Query.equal("status", "APPROVED")
+      ]
+    );
+
+    const used = {};
+
+    for (const l of result.documents) {
+      const days =
+        (new Date(l.to_date) - new Date(l.from_date)) /
+          (1000 * 60 * 60 * 24) + 1;
+
+      used[l.leave_type] = (used[l.leave_type] || 0) + days;
+    }
+
+    res.json(
+      Object.keys(QUOTA).map(type => ({
+        leave_type: type,
+        balance: Math.max(QUOTA[type] - (used[type] || 0), 0)
+      }))
+    );
+
+  } catch (err) {
+    console.error("Leave balance error:", err.message);
+    res.json([]);
+  }
+});
+
+/* =====================================================
+   PENDING LEAVES (MY TEAM)
+===================================================== */
+router.get("/pending/my-team", verifyToken, async (req, res) => {
+  if (!["manager", "hr", "admin"].includes(req.user.role)) {
     return res.status(403).json({ message: "Forbidden" });
   }
 
   try {
-    const [rows] = await db.query(
-      `
-      SELECT
-        l.id,
-        l.from_date,
-        l.to_date,
-        l.leave_type,
-        DATEDIFF(l.to_date, l.from_date) + 1 AS days,
-        e.name AS employee_name
-      FROM leaves l
-      JOIN employees e ON e.id = l.employee_id
-      WHERE l.status = 'PENDING'
-      ORDER BY l.from_date ASC
-      `
+    const queries = [Query.equal("status", "PENDING")];
+
+    if (req.user.role === "manager") {
+      queries.push(Query.equal("manager_user_id", req.user.id));
+    }
+
+    const result = await databases.listDocuments(
+      DB_ID,
+      LEAVE_COL,
+      queries
     );
 
-    res.json(rows);
+    res.json(result.documents);
+
   } catch (err) {
-    console.error("Pending leaves fetch error:", err);
-    res.status(500).json({ message: "DB error" });
+    console.error("Pending team leaves error:", err.message);
+    res.json([]);
   }
 });
 
-/* =========================
+/* =====================================================
+   TEAM ON LEAVE (TODAY)
+===================================================== */
+router.get("/team/on-leave", verifyToken, async (req, res) => {
+  if (!["manager", "hr", "admin"].includes(req.user.role)) {
+    return res.status(403).json({ message: "Forbidden" });
+  }
+
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+
+    const queries = [
+      Query.equal("status", "APPROVED"),
+      Query.lessThanEqual("from_date", today),
+      Query.greaterThanEqual("to_date", today)
+    ];
+
+    if (req.user.role === "manager") {
+      queries.push(Query.equal("manager_user_id", req.user.id));
+    }
+
+    const result = await databases.listDocuments(
+      DB_ID,
+      LEAVE_COL,
+      queries
+    );
+
+    res.json({ count: result.total });
+
+  } catch (err) {
+    console.error("Team on leave error:", err.message);
+    res.json({ count: 0 });
+  }
+});
+
+/* =====================================================
    APPROVE / REJECT LEAVE
-========================= */
+===================================================== */
 router.post("/:id/decision", verifyToken, async (req, res) => {
   if (!["manager", "hr", "admin"].includes(req.user.role)) {
     return res.status(403).json({ message: "Forbidden" });
@@ -175,199 +218,40 @@ router.post("/:id/decision", verifyToken, async (req, res) => {
   }
 
   try {
-    const [result] = await db.query(
-      `
-      UPDATE leaves
-      SET
-        status = ?,
-        approved_by = ?,
-        approved_role = ?,
-        approved_at = NOW()
-      WHERE id = ? AND status = 'PENDING'
-      `,
-      [decision, req.user.id, req.user.role, req.params.id]
+    const doc = await databases.getDocument(
+      DB_ID,
+      LEAVE_COL,
+      req.params.id
     );
 
-    if (!result.affectedRows) {
-      return res.status(400).json({
-        message: "Leave already processed"
-      });
-    }
-
-    /* 🔔 notify employee */
-    const [emp] = await db.query(
-      `
-      SELECT e.user_id
-      FROM leaves l
-      JOIN employees e ON e.id = l.employee_id
-      WHERE l.id = ?
-      `,
-      [req.params.id]
+    await databases.updateDocument(
+      DB_ID,
+      LEAVE_COL,
+      req.params.id,
+      {
+        status: decision,
+        approved_by: req.user.id,
+        approved_role: req.user.role,
+        approved_at: new Date().toISOString()
+      }
     );
 
-    if (emp.length) {
-      createNotification(
-        emp[0].user_id,
-        "leave",
-        `Your leave has been ${decision.toLowerCase()}`
-      );
-    }
+    notify(
+      doc.employee_user_id,
+      "leave",
+      `Your leave was ${decision.toLowerCase()}`
+    );
 
     res.json({ status: "success" });
 
   } catch (err) {
-    console.error("Leave decision error:", err);
-    res.status(500).json({ message: "DB error" });
-  }
-});
-
-/* =========================
-   LEAVE BALANCE
-========================= */
-router.get("/balance", verifyToken, async (req, res) => {
-  try {
-    const emp = await getEmployee(req.user.id);
-
-    const [rows] = await db.query(
-      `
-      SELECT
-        lt.code AS leave_type,
-        lt.name,
-        lt.annual_quota,
-        COALESCE(SUM(DATEDIFF(l.to_date, l.from_date) + 1), 0) AS used,
-        GREATEST(
-          lt.annual_quota -
-          COALESCE(SUM(DATEDIFF(l.to_date, l.from_date) + 1), 0),
-          0
-        ) AS balance
-      FROM leave_types lt
-      LEFT JOIN leaves l
-        ON l.leave_type = lt.code
-        AND l.employee_id = ?
-        AND l.status = 'APPROVED'
-      GROUP BY lt.code, lt.name, lt.annual_quota
-      ORDER BY lt.code
-      `,
-      [emp.id]
-    );
-
-    res.json(rows);
-
-  } catch (err) {
-    console.error("Leave balance error:", err);
-    res.status(500).json({ message: "DB error" });
-  }
-});
-
-/* =========================
-   PENDING LEAVES (MY TEAM)
-========================= */
-router.get("/pending/my-team", verifyToken, async (req, res) => {
-  if (!["manager", "hr", "admin"].includes(req.user.role)) {
-    return res.status(403).json({ message: "Forbidden" });
-  }
-
-  try {
-    const mgr = await getEmployee(req.user.id);
-
-    let sql = `
-      SELECT
-        l.id,
-        l.from_date,
-        l.to_date,
-        l.leave_type,
-        DATEDIFF(l.to_date, l.from_date) + 1 AS days,
-        e.name AS employee
-      FROM leaves l
-      JOIN employees e ON e.id = l.employee_id
-      WHERE l.status = 'PENDING'
-    `;
-    const params = [];
-
-    if (req.user.role === "manager") {
-      sql += " AND e.manager_id = ?";
-      params.push(mgr.id);
-    }
-
-    sql += " ORDER BY l.from_date ASC";
-
-    const [rows] = await db.query(sql, params);
-    res.json(rows);
-
-  } catch (err) {
-    console.error("Pending team leaves error:", err);
-    res.status(500).json({ message: "DB error" });
-  }
-});
-
-/* =========================
-   TEAM ON LEAVE (TODAY)
-========================= */
-router.get("/team/on-leave", verifyToken, async (req, res) => {
-  if (!["manager", "hr", "admin"].includes(req.user.role)) {
-    return res.status(403).json({ message: "Forbidden" });
-  }
-
-  try {
-    const mgr = await getEmployee(req.user.id);
-
-    let sql = `
-      SELECT COUNT(*) AS count
-      FROM leaves l
-      JOIN employees e ON e.id = l.employee_id
-      WHERE l.status = 'APPROVED'
-        AND CURDATE() BETWEEN l.from_date AND l.to_date
-    `;
-    const params = [];
-
-    if (req.user.role === "manager") {
-      sql += " AND e.manager_id = ?";
-      params.push(mgr.id);
-    }
-
-    const [rows] = await db.query(sql, params);
-    res.json({ count: rows[0].count });
-
-  } catch (err) {
-    console.error("Team on leave error:", err);
-    res.status(500).json({ message: "DB error" });
-  }
-});
-
-/* =========================
-   USED LEAVES BY TYPE (SELF)
-========================= */
-router.get("/used/:type", verifyToken, async (req, res) => {
-  try {
-    const leaveType = req.params.type.toUpperCase();
-
-    const [rows] = await db.query(
-      `
-      SELECT
-        DATE_FORMAT(from_date,'%d %b %Y') AS from_date,
-        DATE_FORMAT(to_date,'%d %b %Y') AS to_date,
-        (DATEDIFF(to_date, from_date) + 1) AS days,
-        reason,
-        status
-      FROM leaves
-      WHERE employee_id = (
-        SELECT id FROM employees WHERE user_id = ?
-      )
-      AND leave_type = ?
-      ORDER BY from_date DESC
-      `,
-      [req.user.id, leaveType]
-    );
-
-    res.json(rows);
-
-  } catch (err) {
-    console.error("Leave usage fetch failed:", err);
+    console.error("Leave decision error:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });
 
 module.exports = router;
-/* ======================================================       
-    END routes/leaves.js       
-====================================================== */
+
+/* =====================================================
+   END routes/leaves.js (APPWRITE — CORRECT & SAFE)
+===================================================== */

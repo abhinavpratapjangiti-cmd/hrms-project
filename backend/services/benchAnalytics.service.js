@@ -1,167 +1,196 @@
-/**
- * Bench Analytics Service
- * ----------------------------------
- * Canonical service for all bench KPIs
- *
- * CONFIRMED SCHEMA:
- * - employees.active = 1 → active employee
- * - employees.bench_since IS NOT NULL → employee on bench
- * - payroll.month = VARCHAR(7) → YYYY-MM
- *
- * Company Cost Formula:
- * basic + hra + da + lta + special_allowance + other_allowance + pf
- */
+const sdk = require("node-appwrite");
 
-const db = require("../db");
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
 /* =====================================================
-   INTERNAL: BENCH COST SQL EXPRESSION (SSOT)
+   INTERNAL: DATE DIFF (CURDATE - bench_since)
 ===================================================== */
-const BENCH_COST_EXPR = `
-  IFNULL(p.basic, 0)
-+ IFNULL(p.hra, 0)
-+ IFNULL(p.da, 0)
-+ IFNULL(p.lta, 0)
-+ IFNULL(p.special_allowance, 0)
-+ IFNULL(p.other_allowance, 0)
-+ IFNULL(p.pf, 0)
-`;
-
-/* =====================================================
-   INTERNAL: GET BENCH EMPLOYEES (HEADCOUNT + DAYS)
-   ⚠ NO payroll join (prevents duplication)
-===================================================== */
-async function getBenchEmployees() {
-  const sql = `
-    SELECT
-      e.id,
-      e.bench_since,
-      DATEDIFF(CURDATE(), e.bench_since) AS bench_days
-    FROM employees e
-    WHERE e.active = 1
-      AND e.bench_since IS NOT NULL
-  `;
-
-  const [rows] = await db.query(sql);
-  return rows || [];
+function diffDays(fromDate) {
+  if (!fromDate) return 0;
+  const start = new Date(fromDate);
+  const today = new Date();
+  return Math.floor((today - start) / MS_PER_DAY);
 }
 
 /* =====================================================
-   INTERNAL: TOTAL ACTIVE EMPLOYEES
+   INTERNAL: BENCH COST (SSOT)
 ===================================================== */
-async function getTotalActiveEmployees() {
-  const [rows] = await db.query(
-    `SELECT COUNT(*) AS total FROM employees WHERE active = 1`
+function benchCost(p) {
+  return (
+    Number(p.basic || 0) +
+    Number(p.hra || 0) +
+    Number(p.da || 0) +
+    Number(p.lta || 0) +
+    Number(p.special_allowance || 0) +
+    Number(p.other_allowance || 0) +
+    Number(p.pf || 0)
   );
-
-  return rows?.[0]?.total || 0;
 }
 
 /* =====================================================
-   PUBLIC: BENCH SUMMARY (HEADCOUNT KPI)
+   FACTORY (inject Appwrite client)
 ===================================================== */
-async function getBenchSummary() {
-  const bench = await getBenchEmployees();
-  const totalEmployees = await getTotalActiveEmployees();
+function createBenchAnalyticsService(databases, DB_ID, EMP_COL, PAYROLL_COL) {
 
-  const avgBenchDays =
-    bench.length > 0
-      ? Math.round(
-          bench.reduce((s, e) => s + (Number(e.bench_days) || 0), 0) /
-            bench.length
-        )
-      : 0;
+  /* =====================================================
+     INTERNAL: BENCH EMPLOYEES (HEADCOUNT + DAYS)
+  ===================================================== */
+  async function getBenchEmployees() {
+    const res = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [
+        sdk.Query.equal("active", true),
+        sdk.Query.isNotNull("bench_since"),
+        sdk.Query.limit(500)
+      ]
+    );
+
+    return res.documents.map(e => ({
+      employee_id: e.employee_id,
+      bench_since: e.bench_since,
+      bench_days: diffDays(e.bench_since)
+    }));
+  }
+
+  /* =====================================================
+     INTERNAL: TOTAL ACTIVE EMPLOYEES
+  ===================================================== */
+  async function getTotalActiveEmployees() {
+    const res = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [
+        sdk.Query.equal("active", true),
+        sdk.Query.limit(1)
+      ]
+    );
+
+    return res.total || 0;
+  }
+
+  /* =====================================================
+     PUBLIC: BENCH SUMMARY
+  ===================================================== */
+  async function getBenchSummary() {
+    const bench = await getBenchEmployees();
+    const totalEmployees = await getTotalActiveEmployees();
+
+    const avgBenchDays =
+      bench.length > 0
+        ? Math.round(
+            bench.reduce((s, e) => s + e.bench_days, 0) / bench.length
+          )
+        : 0;
+
+    return {
+      bench_count: bench.length,
+      bench_percent: totalEmployees
+        ? +((bench.length / totalEmployees) * 100).toFixed(1)
+        : 0,
+      avg_bench_days: avgBenchDays
+    };
+  }
+
+  /* =====================================================
+     PUBLIC: BENCH AGING BUCKETS
+  ===================================================== */
+  async function getBenchAgingBuckets() {
+    const bench = await getBenchEmployees();
+
+    return bench.reduce(
+      (b, e) => {
+        const d = e.bench_days;
+
+        if (d <= 30) b.days_0_30++;
+        else if (d <= 60) b.days_31_60++;
+        else b.days_60_plus++;
+
+        return b;
+      },
+      {
+        days_0_30: 0,
+        days_31_60: 0,
+        days_60_plus: 0
+      }
+    );
+  }
+
+  /* =====================================================
+     PUBLIC: BENCH BURN TREND (MONTHLY)
+     Same rule:
+     bench_since YYYY-MM <= payroll.month
+  ===================================================== */
+  async function getBenchBurnTrend(months = 6) {
+    const bench = await getBenchEmployees();
+    if (!bench.length) return [];
+
+    const benchMap = new Map(
+      bench.map(b => [b.employee_id, b.bench_since.slice(0, 7)])
+    );
+
+    const payroll = await databases.listDocuments(
+      DB_ID,
+      PAYROLL_COL,
+      [sdk.Query.limit(1000)]
+    );
+
+    const monthMap = {};
+
+    for (const p of payroll.documents) {
+      const benchStartMonth = benchMap.get(p.employee_id);
+      if (!benchStartMonth) continue;
+
+      if (benchStartMonth <= p.month) {
+        monthMap[p.month] =
+          (monthMap[p.month] || 0) + benchCost(p);
+      }
+    }
+
+    return Object.entries(monthMap)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(-months)
+      .map(([month, bench_cost]) => ({
+        month,
+        bench_cost: Math.round(bench_cost)
+      }));
+  }
+
+  /* =====================================================
+     PUBLIC: BENCH EMPLOYEE LIST
+  ===================================================== */
+  async function getBenchEmployeesList() {
+    const res = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [
+        sdk.Query.equal("active", true),
+        sdk.Query.isNotNull("bench_since"),
+        sdk.Query.limit(500)
+      ]
+    );
+
+    return res.documents
+      .map(e => ({
+        employee_id: e.employee_id,
+        name: e.name,
+        department: e.department,
+        designation: e.designation,
+        work_location: e.work_location,
+        bench_since: e.bench_since,
+        bench_days: diffDays(e.bench_since)
+      }))
+      .sort((a, b) => b.bench_days - a.bench_days);
+  }
 
   return {
-    bench_count: bench.length,
-    bench_percent: totalEmployees
-      ? +((bench.length / totalEmployees) * 100).toFixed(1)
-      : 0,
-    avg_bench_days: avgBenchDays
+    getBenchSummary,
+    getBenchAgingBuckets,
+    getBenchBurnTrend,
+    getBenchEmployeesList
   };
 }
 
-/* =====================================================
-   PUBLIC: BENCH AGING BUCKETS (LOGICAL COUNTS)
-   (Service returns neutral keys; route locks API contract)
-===================================================== */
-async function getBenchAgingBuckets() {
-  const bench = await getBenchEmployees();
-
-  return bench.reduce(
-    (b, e) => {
-      const d = Number(e.bench_days || 0);
-
-      if (d <= 30) b.days_0_30++;
-      else if (d <= 60) b.days_31_60++;
-      else b.days_60_plus++;
-
-      return b;
-    },
-    {
-      days_0_30: 0,
-      days_31_60: 0,
-      days_60_plus: 0
-    }
-  );
-}
-
-/* =====================================================
-   PUBLIC: BENCH BURN TREND (MONTHLY COST)
-   ✅ prevents duplication
-   ✅ supports rolling window
-===================================================== */
-async function getBenchBurnTrend(months = 6) {
-  const sql = `
-    SELECT
-      p.month,
-      SUM(${BENCH_COST_EXPR}) AS bench_cost
-    FROM payroll p
-    JOIN employees e ON e.id = p.employee_id
-    WHERE e.active = 1
-      AND e.bench_since IS NOT NULL
-      AND DATE_FORMAT(e.bench_since, '%Y-%m') <= p.month
-    GROUP BY p.month
-    ORDER BY p.month DESC
-    LIMIT ?
-  `;
-
-  const [rows] = await db.query(sql, [Number(months)]);
-  return (rows || []).reverse();
-}
-
-/* =====================================================
-   PUBLIC: BENCH EMPLOYEE LIST (DRILL DOWN)
-===================================================== */
-async function getBenchEmployeesList() {
-  const sql = `
-    SELECT
-      e.id,
-      e.name,
-      e.department,
-      e.designation,
-      e.work_location,
-      e.bench_since,
-      DATEDIFF(CURDATE(), e.bench_since) AS bench_days
-    FROM employees e
-    WHERE e.active = 1
-      AND e.bench_since IS NOT NULL
-    ORDER BY bench_days DESC
-  `;
-
-  const [rows] = await db.query(sql);
-  return rows || [];
-}
-
-/* =====================================================
-   EXPORTS (CANONICAL)
-===================================================== */
 module.exports = {
-  getBenchSummary,
-  getBenchAgingBuckets,
-  getBenchBurnTrend,
-  getBenchEmployeesList
+  createBenchAnalyticsService
 };
-/* ======================================================
-    END services/benchAnalytics.service.js
-====================================================== */

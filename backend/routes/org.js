@@ -1,38 +1,60 @@
-const express = require("express");
-const router = express.Router();
-const db = require("../db");
-const { verifyToken } = require("../middleware/auth");
+const sdk = require("node-appwrite");
 
-/* =========================
-   ORG CHART
-   GET /api/org
-========================= */
-router.get("/", verifyToken, async (req, res) => {
+module.exports = async ({ req, res, log, error }) => {
+  /* =========================
+     APPWRITE CLIENT
+  ========================= */
+  const client = new sdk.Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setJWT(req.headers["x-appwrite-jwt"]);
+
+  const databases = new sdk.Databases(client);
+  const users = new sdk.Users(client);
+
+  const DB_ID = process.env.APPWRITE_DB_ID;
+  const EMP_COL = process.env.APPWRITE_EMPLOYEE_COLLECTION_ID;
+
+  /* =========================
+     AUTH (verifyToken replacement)
+  ========================= */
   try {
-    const [rows] = await db.query(
-      `
-      SELECT 
-        e.id,
-        e.name,
-        u.role,
-        e.manager_id,
-        m.name AS manager_name
-      FROM employees e
-      JOIN users u ON u.id = e.user_id
-      LEFT JOIN employees m ON e.manager_id = m.id
-      ORDER BY manager_name, e.name
-      `
+    await users.get("me");
+  } catch {
+    return res.json({ message: "Unauthorized" }, 401);
+  }
+
+  /* =========================
+     ROUTE CHECK
+     GET /org
+  ========================= */
+  if (req.method !== "GET" || req.path !== "/org") {
+    return res.json({ message: "Route not found" }, 404);
+  }
+
+  try {
+    const result = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [
+        sdk.Query.orderAsc("manager_name"),
+        sdk.Query.orderAsc("name"),
+        sdk.Query.limit(500) // safety cap
+      ]
     );
 
-    res.json(rows);
+    return res.json(
+      result.documents.map(e => ({
+        id: e.employee_id,
+        name: e.name,
+        role: e.role,
+        manager_id: e.manager_id || null,
+        manager_name: e.manager_name || null
+      }))
+    );
 
   } catch (err) {
-    console.error("ORG CHART ERROR:", err);
-    res.status(500).json({ message: "DB error" });
+    error(err);
+    return res.json({ message: "DB error" }, 500);
   }
-});
-
-module.exports = router;
-/* =========================        
-    END routes/org.js       
-========================= */
+};

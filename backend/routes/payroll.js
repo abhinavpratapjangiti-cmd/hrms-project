@@ -1,170 +1,173 @@
-const express = require("express");
-const router = express.Router();
-const db = require("../db");
+const sdk = require("node-appwrite");
 const PDFDocument = require("pdfkit");
-const path = require("path");
 const fs = require("fs");
-const { verifyToken } = require("../middleware/auth");
+const path = require("path");
 
-/* =========================
-   LIST PAYSLIP MONTHS
-   GET /api/payslips/my/months
-========================= */
-router.get("/my/months", verifyToken, async (req, res) => {
+module.exports = async ({ req, res, log, error }) => {
+  const client = new sdk.Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setJWT(req.headers["x-appwrite-jwt"]);
+
+  const users = new sdk.Users(client);
+  const databases = new sdk.Databases(client);
+  const storage = new sdk.Storage(client);
+
+  const DB_ID = process.env.APPWRITE_DB_ID;
+  const EMP_COL = process.env.EMP_COLLECTION_ID;
+  const PAYROLL_COL = process.env.PAYROLL_COLLECTION_ID;
+  const BUCKET_ID = process.env.PAYSLIP_BUCKET_ID;
+
+  /* =========================
+     AUTH
+  ========================= */
+  let me;
   try {
-    const empId = req.user.employee_id;
-    if (!empId) return res.json([]);
-
-    const [rows] = await db.query(
-      `
-      SELECT DISTINCT month
-      FROM payroll
-      WHERE employee_id = ?
-      ORDER BY month DESC
-      `,
-      [empId]
-    );
-
-    res.json(rows.map(r => r.month));
-
-  } catch (err) {
-    console.error("Payslip months error:", err);
-    res.json([]);
+    me = await users.get("me");
+  } catch {
+    return res.json({ message: "Unauthorized" }, 401);
   }
-});
 
-/* =========================
-   GET PAYSLIP DATA (UI)
-   GET /api/payslips/my/:month
-========================= */
-router.get("/my/:month", verifyToken, async (req, res) => {
+  const userId = me.$id;
+  const route = `${req.method} ${req.path}`;
+
+  /* =========================
+     FETCH EMPLOYEE
+  ========================= */
+  const empRes = await databases.listDocuments(
+    DB_ID,
+    EMP_COL,
+    [sdk.Query.equal("user_id", userId)]
+  );
+
+  const employee = empRes.documents[0];
+  if (!employee) return res.json([], 200);
+
+  const empId = employee.employee_id;
+
   try {
-    const empId = req.user.employee_id;
-    const { month } = req.params;
 
-    if (!empId) return res.json({});
-
-    const [rows] = await db.query(
-      `
-      SELECT *
-      FROM payroll
-      WHERE employee_id = ?
-        AND month = ?
-      LIMIT 1
-      `,
-      [empId, month]
-    );
-
-    res.json(rows[0] || {});
-
-  } catch (err) {
-    console.error("Payslip fetch error:", err);
-    res.status(500).json({ message: "DB error" });
-  }
-});
-
-/* =========================
-   PAYSLIP PDF (SIMPLE)
-   GET /api/payslips/my/:month/pdf
-========================= */
-router.get("/my/:month/pdf", verifyToken, async (req, res) => {
-  try {
-    const empId = req.user.employee_id;
-    const { month } = req.params;
-
-    if (!empId) return res.status(404).send("Employee not found");
-
-    const [rows] = await db.query(
-      `
-      SELECT p.*, e.name
-      FROM payroll p
-      JOIN employees e ON e.id = p.employee_id
-      WHERE p.employee_id = ?
-        AND p.month = ?
-      LIMIT 1
-      `,
-      [empId, month]
-    );
-
-    if (!rows.length) {
-      return res.status(404).send("Payslip not found");
-    }
-
-    const p = rows[0];
-    const doc = new PDFDocument({ margin: 40 });
-
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename=Payslip-${month}.pdf`
-    );
-    res.setHeader("Content-Type", "application/pdf");
-
-    doc.pipe(res);
-
-    /* ===== LOGO ===== */
-    const logoPath = path.join(__dirname, "../public/assets/logo.png");
-    if (fs.existsSync(logoPath)) {
-      doc.image(logoPath, 40, 30, { width: 80 });
-    }
-
-    doc
-      .fontSize(10)
-      .text(
-        "Lovas IT Solutions\nKakinada, Andhra Pradesh\nwww.lovasit.com",
-        350,
-        30,
-        { align: "right" }
+    /* =========================
+       LIST PAYSLIP MONTHS
+       GET /payslips/my/months
+    ========================= */
+    if (route === "GET /payslips/my/months") {
+      const result = await databases.listDocuments(
+        DB_ID,
+        PAYROLL_COL,
+        [
+          sdk.Query.equal("employee_id", empId),
+          sdk.Query.orderDesc("month"),
+          sdk.Query.limit(50)
+        ]
       );
 
-    doc.moveDown(4);
-    doc.fontSize(18).text("Salary Payslip", { align: "center" });
-    doc.moveDown(2);
+      const months = [
+        ...new Set(result.documents.map(d => d.month))
+      ];
 
-    doc.fontSize(11);
-    doc.text(`Employee Name : ${p.name}`);
-    doc.text(`Payslip Month : ${month}`);
-    doc.moveDown(2);
+      return res.json(months);
+    }
 
-    /* ===== EARNINGS ===== */
-    doc.font("Helvetica-Bold").text("Earnings");
-    doc.font("Helvetica");
-    doc.text(`Basic : ₹ ${p.basic || 0}`);
-    doc.text(`HRA   : ₹ ${p.hra || 0}`);
-    doc.text(`DA    : ₹ ${p.da || 0}`);
-    doc.text(`LTA   : ₹ ${p.lta || 0}`);
-    doc.text(`Special Allowance : ₹ ${p.special_allowance || 0}`);
+    /* =========================
+       GET PAYSLIP DATA
+       GET /payslips/my/:month
+    ========================= */
+    if (req.method === "GET" && req.path.startsWith("/payslips/my/") && !req.path.endsWith("/pdf")) {
+      const month = req.path.split("/")[3];
 
-    doc.moveDown(1);
+      const result = await databases.listDocuments(
+        DB_ID,
+        PAYROLL_COL,
+        [
+          sdk.Query.equal("employee_id", empId),
+          sdk.Query.equal("month", month),
+          sdk.Query.limit(1)
+        ]
+      );
 
-    /* ===== DEDUCTIONS ===== */
-    doc.font("Helvetica-Bold").text("Deductions");
-    doc.font("Helvetica");
-    doc.text(`PF  : ₹ ${p.pf || 0}`);
-    doc.text(`ESI : ₹ ${p.esi || 0}`);
-    doc.text(`TDS : ₹ ${p.tds || 0}`);
-    doc.text(`Other : ₹ ${p.other_deductions || 0}`);
+      return res.json(result.documents[0] || {});
+    }
 
-    doc.moveDown(2);
+    /* =========================
+       PAYSLIP PDF
+       GET /payslips/my/:month/pdf
+    ========================= */
+    if (req.method === "GET" && req.path.endsWith("/pdf")) {
+      const month = req.path.split("/")[3];
 
-    /* ===== NET PAY ===== */
-    doc.font("Helvetica-Bold");
-    doc.text(`Net Pay : ₹ ${p.net_pay || 0}`, { align: "right" });
+      const result = await databases.listDocuments(
+        DB_ID,
+        PAYROLL_COL,
+        [
+          sdk.Query.equal("employee_id", empId),
+          sdk.Query.equal("month", month),
+          sdk.Query.limit(1)
+        ]
+      );
 
-    doc.moveDown(2);
-    doc.fontSize(9).text(
-      "This is a system generated payslip and does not require a signature.",
-      { align: "center" }
-    );
+      if (!result.documents.length) {
+        return res.json({ message: "Payslip not found" }, 404);
+      }
 
-    doc.end();
+      const p = result.documents[0];
+      const tmpFile = `/tmp/Payslip-${empId}-${month}.pdf`;
+      const doc = new PDFDocument({ margin: 40 });
+      const stream = fs.createWriteStream(tmpFile);
+
+      doc.pipe(stream);
+
+      doc.fontSize(18).text("Salary Payslip", { align: "center" });
+      doc.moveDown(2);
+
+      doc.fontSize(11);
+      doc.text(`Employee Name : ${employee.name}`);
+      doc.text(`Payslip Month : ${month}`);
+      doc.moveDown(2);
+
+      doc.font("Helvetica-Bold").text("Earnings");
+      doc.font("Helvetica");
+      doc.text(`Basic : ₹ ${p.basic || 0}`);
+      doc.text(`HRA   : ₹ ${p.hra || 0}`);
+      doc.text(`DA    : ₹ ${p.da || 0}`);
+      doc.text(`LTA   : ₹ ${p.lta || 0}`);
+      doc.text(`Special Allowance : ₹ ${p.special_allowance || 0}`);
+
+      doc.moveDown(1);
+      doc.font("Helvetica-Bold").text("Deductions");
+      doc.font("Helvetica");
+      doc.text(`PF  : ₹ ${p.pf || 0}`);
+      doc.text(`ESI : ₹ ${p.esi || 0}`);
+      doc.text(`TDS : ₹ ${p.tds || 0}`);
+      doc.text(`Other : ₹ ${p.other_deductions || 0}`);
+
+      doc.moveDown(2);
+      doc.font("Helvetica-Bold").text(`Net Pay : ₹ ${p.net_pay || 0}`, { align: "right" });
+
+      doc.end();
+
+      await new Promise(resolve => stream.on("finish", resolve));
+
+      const uploaded = await storage.createFile(
+        BUCKET_ID,
+        sdk.ID.unique(),
+        fs.createReadStream(tmpFile)
+      );
+
+      fs.unlinkSync(tmpFile);
+
+      return res.json({
+        downloadUrl: storage.getFileDownload(
+          BUCKET_ID,
+          uploaded.$id
+        )
+      });
+    }
+
+    return res.json({ message: "Route not found" }, 404);
 
   } catch (err) {
-    console.error("Payslip PDF error:", err);
-    res.status(500).send("Payslip generation failed");
+    error(err);
+    return res.json({ message: "Payslip failed" }, 500);
   }
-});
-
-module.exports = router;
-/* =========================
-   END routes/payroll.js
-========================= */
+};

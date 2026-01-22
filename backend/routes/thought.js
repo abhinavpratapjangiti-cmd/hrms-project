@@ -1,7 +1,4 @@
-const express = require("express");
-const router = express.Router();
-const db = require("../db");
-const { verifyToken } = require("../middleware/auth");
+const sdk = require("node-appwrite");
 
 /* =========================
    OPTIONAL OPENAI (LAZY LOAD)
@@ -9,9 +6,7 @@ const { verifyToken } = require("../middleware/auth");
 let openaiClient = null;
 
 function getOpenAIClient() {
-  if (!process.env.OPENAI_API_KEY) {
-    return null;
-  }
+  if (!process.env.OPENAI_API_KEY) return null;
 
   if (!openaiClient) {
     const OpenAI = require("openai");
@@ -40,29 +35,52 @@ function getFallbackThought() {
   ];
 }
 
-/* =========================
-   GET THOUGHT OF THE DAY
-   GET /api/thought/today
-========================= */
-router.get("/today", verifyToken, async (req, res) => {
+module.exports = async ({ req, res, log, error }) => {
+  const client = new sdk.Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setJWT(req.headers["x-appwrite-jwt"]);
+
+  const users = new sdk.Users(client);
+  const databases = new sdk.Databases(client);
+
+  const DB_ID = process.env.APPWRITE_DB_ID;
+  const THOUGHT_COL = process.env.APPWRITE_THOUGHT_COLLECTION_ID;
+
+  /* =========================
+     AUTH (verifyToken)
+  ========================= */
+  try {
+    await users.get("me");
+  } catch {
+    return res.json({ thought: getFallbackThought() }, 401);
+  }
+
+  /* =========================
+     ROUTE CHECK
+     GET /thought/today
+  ========================= */
+  if (req.method !== "GET" || req.path !== "/thought/today") {
+    return res.json({ message: "Route not found" }, 404);
+  }
+
   const today = new Date().toISOString().slice(0, 10);
 
   try {
     /* =========================
        1️⃣ CHECK DB FIRST
     ========================= */
-    const [rows] = await db.query(
-      `
-      SELECT thought
-      FROM thought_of_the_day
-      WHERE active_date = ?
-      LIMIT 1
-      `,
-      [today]
+    const existing = await databases.listDocuments(
+      DB_ID,
+      THOUGHT_COL,
+      [
+        sdk.Query.equal("active_date", today),
+        sdk.Query.limit(1)
+      ]
     );
 
-    if (rows.length) {
-      return res.json({ thought: rows[0].thought });
+    if (existing.documents.length) {
+      return res.json({ thought: existing.documents[0].thought });
     }
 
     /* =========================
@@ -95,38 +113,33 @@ router.get("/today", verifyToken, async (req, res) => {
           source = "AI";
         }
       } catch (aiErr) {
-        console.warn(
-          "OpenAI unavailable, fallback used:",
-          aiErr.code || aiErr.message
-        );
+        log("OpenAI unavailable, fallback used");
       }
     }
 
     /* =========================
-       3️⃣ SAVE RESULT (NON-BLOCKING)
+       3️⃣ SAVE RESULT (BEST EFFORT)
     ========================= */
     try {
-      await db.query(
-        `
-        INSERT INTO thought_of_the_day
-        (thought, author, source, active_date)
-        VALUES (?, 'SYSTEM', ?, ?)
-        `,
-        [thought, source, today]
+      await databases.createDocument(
+        DB_ID,
+        THOUGHT_COL,
+        sdk.ID.unique(),
+        {
+          thought,
+          author: "SYSTEM",
+          source,
+          active_date: today
+        }
       );
     } catch (insertErr) {
-      console.error("Thought insert error:", insertErr);
+      log("Thought insert skipped");
     }
 
     return res.json({ thought });
 
   } catch (err) {
-    console.error("Thought DB error:", err);
+    error(err);
     return res.json({ thought: getFallbackThought() });
   }
-});
-
-module.exports = router;
-/* =========================
-   END routes/thought.js
-========================= */
+};

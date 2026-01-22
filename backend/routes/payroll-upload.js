@@ -1,154 +1,169 @@
-const express = require("express");
-const router = express.Router();
-const multer = require("multer");
-const fs = require("fs");
+const sdk = require("node-appwrite");
 const csv = require("csv-parser");
 const XLSX = require("xlsx");
-const db = require("../db");
-const { verifyToken } = require("../middleware/auth");
+const fs = require("fs");
+const path = require("path");
 
-const upload = multer({ dest: "uploads/" });
+module.exports = async ({ req, res, log, error }) => {
+  const client = new sdk.Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setJWT(req.headers["x-appwrite-jwt"]);
 
-/* =========================
-   PAYROLL UPLOAD
-   POST /api/payroll/upload
-========================= */
-router.post(
-  "/upload",
-  verifyToken,
-  upload.single("payrollFile"),
-  async (req, res) => {
-    try {
-      /* 🔒 ROLE CHECK */
-      if (!["admin", "hr"].includes(req.user.role)) {
-        return res.status(403).json({ message: "Unauthorized" });
-      }
+  const users = new sdk.Users(client);
+  const databases = new sdk.Databases(client);
+  const storage = new sdk.Storage(client);
 
-      /* 🔴 FILE GUARD */
-      if (!req.file) {
-        return res.status(400).json({ message: "Payroll file missing" });
-      }
+  const DB_ID = process.env.APPWRITE_DB_ID;
+  const EMP_COL = process.env.EMP_COLLECTION_ID;
+  const PAYROLL_COL = process.env.PAYROLL_COLLECTION_ID;
+  const BUCKET_ID = process.env.PAYROLL_BUCKET_ID;
 
-      const filePath = req.file.path;
-      const ext = req.file.originalname.split(".").pop().toLowerCase();
-
-      let rows = [];
-
-      /* =========================
-         PARSE FILE
-      ========================= */
-      if (ext === "csv") {
-        rows = await parseCSV(filePath);
-      } else if (ext === "xlsx") {
-        const wb = XLSX.readFile(filePath);
-        const sheet = wb.SheetNames[0];
-        rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: null });
-      } else {
-        fs.unlinkSync(filePath);
-        return res.status(400).json({ message: "Unsupported file type" });
-      }
-
-      const errors = [];
-      let uploaded = 0;
-
-      /* =========================
-         PROCESS ROWS (SEQUENTIAL, SAFE)
-      ========================= */
-      for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-
-        try {
-          if (!r.emp_code || !r.month) {
-            errors.push(`Row ${i + 1}: emp_code or month missing`);
-            continue;
-          }
-
-          const emp = await getEmployeeByCode(r.emp_code);
-          if (!emp) {
-            errors.push(`Row ${i + 1}: Invalid emp_code`);
-            continue;
-          }
-
-          const exists = await payrollExists(emp.id, r.month);
-          if (exists) {
-            errors.push(`Row ${i + 1}: Payroll already exists`);
-            continue;
-          }
-
-          await insertPayroll(emp.id, r);
-          uploaded++;
-
-        } catch (e) {
-          errors.push(`Row ${i + 1}: ${e.message}`);
-        }
-      }
-
-      fs.unlinkSync(filePath);
-      res.json({ uploaded, errors });
-
-    } catch (err) {
-      console.error("Payroll upload failed:", err);
-      res.status(500).json({ message: "Payroll upload failed" });
-    }
+  /* =========================
+     AUTH
+  ========================= */
+  let me;
+  try {
+    me = await users.get("me");
+  } catch {
+    return res.json({ message: "Unauthorized" }, 401);
   }
-);
+
+  if (!["admin", "hr"].includes(me.prefs?.role)) {
+    return res.json({ message: "Unauthorized" }, 403);
+  }
+
+  /* =========================
+     INPUT
+  ========================= */
+  const { fileId } = JSON.parse(req.body || "{}");
+  if (!fileId) {
+    return res.json({ message: "fileId missing" }, 400);
+  }
+
+  try {
+    /* =========================
+       DOWNLOAD FILE
+    ========================= */
+    const tempPath = `/tmp/${fileId}`;
+    const fileBuffer = await storage.getFileDownload(
+      BUCKET_ID,
+      fileId
+    );
+
+    fs.writeFileSync(tempPath, Buffer.from(fileBuffer));
+
+    const ext = path.extname(fileId).replace(".", "").toLowerCase();
+    let rows = [];
+
+    /* =========================
+       PARSE FILE
+    ========================= */
+    if (ext === "csv") {
+      rows = await parseCSV(tempPath);
+    } else if (ext === "xlsx") {
+      const wb = XLSX.readFile(tempPath);
+      const sheet = wb.SheetNames[0];
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { defval: null });
+    } else {
+      return res.json({ message: "Unsupported file type" }, 400);
+    }
+
+    let uploaded = 0;
+    const errors = [];
+
+    /* =========================
+       PROCESS ROWS
+    ========================= */
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+
+      try {
+        if (!r.emp_code || !r.month) {
+          errors.push(`Row ${i + 1}: emp_code or month missing`);
+          continue;
+        }
+
+        const emp = await findEmployee(r.emp_code);
+        if (!emp) {
+          errors.push(`Row ${i + 1}: Invalid emp_code`);
+          continue;
+        }
+
+        const exists = await payrollExists(emp.employee_id, r.month);
+        if (exists) {
+          errors.push(`Row ${i + 1}: Payroll already exists`);
+          continue;
+        }
+
+        await databases.createDocument(
+          DB_ID,
+          PAYROLL_COL,
+          sdk.ID.unique(),
+          {
+            employee_id: emp.employee_id,
+            month: r.month,
+            working_days: Number(r.working_days) || 0,
+            paid_days: Number(r.paid_days) || 0,
+            basic: Number(r.basic) || 0,
+            hra: Number(r.hra) || 0,
+            special_allowance: Number(r.special_allowance) || 0,
+            deductions: Number(r.deductions) || 0,
+            net_pay: Number(r.net_pay) || 0,
+            locked: true
+          }
+        );
+
+        uploaded++;
+      } catch (e) {
+        errors.push(`Row ${i + 1}: ${e.message}`);
+      }
+    }
+
+    fs.unlinkSync(tempPath);
+    return res.json({ uploaded, errors });
+
+  } catch (err) {
+    error(err);
+    return res.json({ message: "Payroll upload failed" }, 500);
+  }
+
+  /* =========================
+     HELPERS
+  ========================= */
+  async function findEmployee(code) {
+    const res = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [sdk.Query.equal("emp_code", code)]
+    );
+    return res.documents[0] || null;
+  }
+
+  async function payrollExists(empId, month) {
+    const res = await databases.listDocuments(
+      DB_ID,
+      PAYROLL_COL,
+      [
+        sdk.Query.equal("employee_id", empId),
+        sdk.Query.equal("month", month),
+        sdk.Query.limit(1)
+      ]
+    );
+    return res.total > 0;
+  }
+};
 
 /* =========================
    CSV PARSER
 ========================= */
-function parseCSV(path) {
+function parseCSV(filePath) {
   return new Promise((resolve, reject) => {
     const rows = [];
-    fs.createReadStream(path)
+    fs.createReadStream(filePath)
       .pipe(csv())
       .on("data", row => rows.push(row))
       .on("end", () => resolve(rows))
       .on("error", reject);
   });
 }
-
-/* =========================
-   DB HELPERS (PROMISE SAFE)
-========================= */
-async function getEmployeeByCode(code) {
-  const [rows] = await db.query(
-    "SELECT id FROM employees WHERE emp_code = ?",
-    [code]
-  );
-  return rows[0] || null;
-}
-
-async function payrollExists(empId, month) {
-  const [rows] = await db.query(
-    "SELECT id FROM payroll WHERE employee_id = ? AND month = ?",
-    [empId, month]
-  );
-  return rows.length > 0;
-}
-
-async function insertPayroll(empId, r) {
-  await db.query(
-    `
-    INSERT INTO payroll
-      (employee_id, month, working_days, paid_days,
-       basic, hra, special_allowance, deductions, net_pay, locked)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    `,
-    [
-      empId,
-      r.month,
-      Number(r.working_days) || 0,
-      Number(r.paid_days) || 0,
-      Number(r.basic) || 0,
-      Number(r.hra) || 0,
-      Number(r.special_allowance) || 0,
-      Number(r.deductions) || 0,
-      Number(r.net_pay) || 0
-    ]
-  );
-}
-
-module.exports = router;
-/* =========================
-   END routes/payroll-upload.js
-========================= */  

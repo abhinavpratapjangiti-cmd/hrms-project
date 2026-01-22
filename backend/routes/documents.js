@@ -1,32 +1,24 @@
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
-const path = require("path");
-const fs = require("fs");
-const db = require("../db");
 const { verifyToken } = require("../middleware/auth");
 
-/* =========================
-   UPLOAD DIRECTORY
-========================= */
-const CV_DIR = path.join(__dirname, "../uploads/cv");
-if (!fs.existsSync(CV_DIR)) {
-  fs.mkdirSync(CV_DIR, { recursive: true });
-}
+const { Query } = require("node-appwrite");
+const databases = require("../lib/appwrite").databases;
+const storage = require("../lib/appwrite").storage;
 
 /* =========================
-   MULTER CONFIG
+   ENV
 ========================= */
-const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, CV_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `emp_${req.user.employee_id}_cv${ext}`);
-  }
-});
+const DB_ID = process.env.APPWRITE_DB_ID;
+const DOC_COL = process.env.APPWRITE_EMP_DOC_COLLECTION_ID;
+const CV_BUCKET = process.env.APPWRITE_CV_BUCKET_ID;
 
+/* =========================
+   MULTER (MEMORY)
+========================= */
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_, file, cb) => {
     const allowed = [
@@ -47,26 +39,56 @@ router.post("/cv", verifyToken, upload.single("cv"), async (req, res) => {
       return res.status(400).json({ message: "No file uploaded" });
     }
 
-    const sql = `
-      INSERT INTO employee_documents
-        (employee_id, doc_type, file_name, file_path, uploaded_by, uploaded_at)
-      VALUES (?, 'CV', ?, ?, 'employee', NOW())
-      ON DUPLICATE KEY UPDATE
-        file_name = VALUES(file_name),
-        file_path = VALUES(file_path),
-        uploaded_at = NOW()
-    `;
+    const employeeId = req.user.employee_id;
 
-    await db.query(sql, [
-      req.user.employee_id,
-      req.file.filename,
-      req.file.path
-    ]);
+    /* 1️⃣ DELETE OLD CV (if exists) */
+    const existing = await databases.listDocuments(
+      DB_ID,
+      DOC_COL,
+      [
+        Query.equal("employee_id", employeeId),
+        Query.equal("doc_type", "CV"),
+        Query.limit(1)
+      ]
+    );
+
+    if (existing.total) {
+      const old = existing.documents[0];
+
+      try {
+        await storage.deleteFile(CV_BUCKET, old.file_id);
+      } catch (_) {}
+
+      await databases.deleteDocument(DB_ID, DOC_COL, old.$id);
+    }
+
+    /* 2️⃣ UPLOAD FILE TO APPWRITE */
+    const file = await storage.createFile(
+      CV_BUCKET,
+      "unique()",
+      req.file.buffer,
+      req.file.originalname
+    );
+
+    /* 3️⃣ SAVE METADATA */
+    await databases.createDocument(
+      DB_ID,
+      DOC_COL,
+      "unique()",
+      {
+        employee_id: employeeId,
+        doc_type: "CV",
+        file_id: file.$id,
+        file_name: req.file.originalname,
+        uploaded_by: "employee",
+        uploaded_at: new Date().toISOString()
+      }
+    );
 
     res.json({ success: true });
 
   } catch (err) {
-    console.error("CV upload error:", err);
+    console.error("CV upload error:", err.message);
     res.status(500).json({ message: "Upload failed" });
   }
 });
@@ -76,33 +98,36 @@ router.post("/cv", verifyToken, upload.single("cv"), async (req, res) => {
 ====================================================== */
 router.get("/cv/my", verifyToken, async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `
-      SELECT file_name, file_path
-      FROM employee_documents
-      WHERE employee_id = ? AND doc_type = 'CV'
-      LIMIT 1
-      `,
-      [req.user.employee_id]
+    const result = await databases.listDocuments(
+      DB_ID,
+      DOC_COL,
+      [
+        Query.equal("employee_id", req.user.employee_id),
+        Query.equal("doc_type", "CV"),
+        Query.limit(1)
+      ]
     );
 
-    if (!rows.length) {
+    if (!result.total) {
       return res.status(404).json({ message: "CV not found" });
     }
 
-    const { file_name, file_path } = rows[0];
+    const doc = result.documents[0];
 
-    if (!file_path || !fs.existsSync(file_path)) {
-      console.warn("CV missing on disk:", file_path);
-      return res.status(404).json({
-        message: "CV file not found on server"
-      });
-    }
+    const file = await storage.getFileDownload(
+      CV_BUCKET,
+      doc.file_id
+    );
 
-    res.download(file_path, file_name);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${doc.file_name}"`
+    );
+
+    file.pipe(res);
 
   } catch (err) {
-    console.error("CV fetch error:", err);
+    console.error("CV fetch error:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -117,29 +142,24 @@ router.get("/cv/list", verifyToken, async (req, res) => {
   }
 
   try {
-    const [rows] = await db.query(
-      `
-      SELECT
-        d.employee_id,
-        e.name,
-        e.skills,
-        e.department,
-        d.uploaded_at,
-        d.file_name,
-        CONCAT('/api/documents/cv/', d.employee_id) AS url
-      FROM employee_documents d
-      JOIN employees e ON e.id = d.employee_id
-      WHERE d.doc_type = 'CV'
-        AND e.active = 1
-      ORDER BY d.uploaded_at DESC
-      `
+    const result = await databases.listDocuments(
+      DB_ID,
+      DOC_COL,
+      [Query.equal("doc_type", "CV")]
     );
 
-    res.json(rows || []);
+    const rows = result.documents.map(d => ({
+      employee_id: d.employee_id,
+      file_name: d.file_name,
+      uploaded_at: d.uploaded_at,
+      url: `/api/documents/cv/${d.employee_id}`
+    }));
+
+    res.json(rows);
 
   } catch (err) {
-    console.error("CV list error:", err);
-    res.status(500).json([]);
+    console.error("CV list error:", err.message);
+    res.json([]);
   }
 });
 
@@ -157,38 +177,42 @@ router.get("/cv/:employeeId", verifyToken, async (req, res) => {
   }
 
   try {
-    const [rows] = await db.query(
-      `
-      SELECT file_name, file_path
-      FROM employee_documents
-      WHERE employee_id = ? AND doc_type = 'CV'
-      LIMIT 1
-      `,
-      [employeeId]
+    const result = await databases.listDocuments(
+      DB_ID,
+      DOC_COL,
+      [
+        Query.equal("employee_id", employeeId),
+        Query.equal("doc_type", "CV"),
+        Query.limit(1)
+      ]
     );
 
-    if (!rows.length) {
+    if (!result.total) {
       return res.status(404).json({ message: "CV not found" });
     }
 
-    const { file_name, file_path } = rows[0];
+    const doc = result.documents[0];
 
-    if (!file_path || !fs.existsSync(file_path)) {
-      console.warn("CV missing on disk:", file_path);
-      return res.status(404).json({
-        message: "CV file not found on server"
-      });
-    }
+    const file = await storage.getFileDownload(
+      CV_BUCKET,
+      doc.file_id
+    );
 
-    res.download(file_path, file_name);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${doc.file_name}"`
+    );
+
+    file.pipe(res);
 
   } catch (err) {
-    console.error("CV download error:", err);
+    console.error("CV download error:", err.message);
     res.status(500).json({ message: "Server error" });
   }
 });
 
 module.exports = router;
-/* ======================================================       
-    END routes/documents.js       
+
+/* ======================================================
+   END routes/documents.js (APPWRITE)
 ====================================================== */

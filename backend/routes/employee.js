@@ -1,22 +1,36 @@
 const express = require("express");
 const router = express.Router();
-const db = require("../db");
 const { verifyToken } = require("../middleware/auth");
 
+const { Query } = require("node-appwrite");
+const databases = require("../lib/appwrite").databases;
+
 /* =========================
-   HELPER: USER → EMPLOYEE ID
+   ENV
 ========================= */
-async function getEmployeeIdByUser(userId) {
-  const [rows] = await db.query(
-    "SELECT id FROM employees WHERE user_id = ? LIMIT 1",
-    [userId]
+const DB_ID = process.env.APPWRITE_DB_ID;
+const EMP_COL = process.env.APPWRITE_EMP_COLLECTION_ID;
+const ROLE_HISTORY_COL = process.env.APPWRITE_EMP_ROLE_HISTORY_COLLECTION_ID;
+
+/* =========================
+   HELPER: USER → EMPLOYEE
+========================= */
+async function getEmployeeByUser(userId) {
+  const res = await databases.listDocuments(
+    DB_ID,
+    EMP_COL,
+    [
+      Query.equal("user_id", userId),
+      Query.limit(1)
+    ]
   );
-  if (!rows.length) throw new Error("Employee not found");
-  return rows[0].id;
+
+  if (!res.total) throw new Error("Employee not found");
+  return res.documents[0];
 }
 
 /* =========================
-   EMPLOYEE SEARCH (HR / ADMIN / MANAGER)
+   EMPLOYEE SEARCH
 ========================= */
 router.get("/search", verifyToken, async (req, res) => {
   const q = (req.query.q || "").trim();
@@ -28,40 +42,43 @@ router.get("/search", verifyToken, async (req, res) => {
   }
 
   try {
-    let sql = `
-      SELECT
-        e.id,
-        e.name,
-        e.emp_code,
-        e.designation,
-        e.department
-      FROM employees e
-      WHERE (
-        e.name LIKE ?
-        OR e.emp_code LIKE ?
-      )
-    `;
-    const params = [`%${q}%`, `%${q}%`];
+    const queries = [
+      Query.or([
+        Query.search("name", q),
+        Query.search("emp_code", q)
+      ]),
+      Query.limit(10)
+    ];
 
     if (role === "manager") {
-      const managerEmpId = await getEmployeeIdByUser(req.user.id);
-      sql += " AND e.manager_id = ?";
-      params.push(managerEmpId);
+      const mgr = await getEmployeeByUser(req.user.id);
+      queries.push(Query.equal("manager_id", mgr.$id));
     }
 
-    sql += " ORDER BY e.name LIMIT 10";
+    const result = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      queries
+    );
 
-    const [rows] = await db.query(sql, params);
-    res.json(rows);
+    res.json(
+      result.documents.map(e => ({
+        id: e.$id,
+        name: e.name,
+        emp_code: e.emp_code,
+        designation: e.designation,
+        department: e.department
+      }))
+    );
 
   } catch (err) {
-    console.error("EMP SEARCH ERROR:", err);
+    console.error("EMP SEARCH ERROR:", err.message);
     res.json([]);
   }
 });
 
 /* =========================
-   GET ALL EMPLOYEES (ADMIN / HR)
+   GET ALL EMPLOYEES
 ========================= */
 router.get("/", verifyToken, async (req, res) => {
   const role = req.user.role?.toLowerCase();
@@ -70,125 +87,106 @@ router.get("/", verifyToken, async (req, res) => {
   }
 
   try {
-    const [rows] = await db.query(
-      `
-      SELECT
-        e.id,
-        e.name,
-        e.email,
-        u.role,
-        e.department,
-        e.manager_id,
-        e.active
-      FROM employees e
-      JOIN users u ON u.id = e.user_id
-      ORDER BY e.name
-      `
+    const result = await databases.listDocuments(
+      DB_ID,
+      EMP_COL,
+      [Query.orderAsc("name")]
     );
 
-    res.json(rows);
+    res.json(
+      result.documents.map(e => ({
+        id: e.$id,
+        name: e.name,
+        email: e.email,
+        role: e.role,
+        department: e.department,
+        manager_id: e.manager_id,
+        active: e.active
+      }))
+    );
 
   } catch (err) {
-    console.error("EMP LIST ERROR:", err);
+    console.error("EMP LIST ERROR:", err.message);
     res.status(500).json({ message: "DB error" });
   }
 });
 
 /* =========================
-   GET MY PROFILE (ME PAGE)
+   GET MY PROFILE
 ========================= */
 router.get("/me", verifyToken, async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `
-      SELECT
-        e.id,
-        e.name,
-        e.email,
-        e.employment_type,
-        u.role,
-        u.profile_photo,
-        e.department,
-        e.client_name,
-        e.work_location,
-        e.designation,
-        DATE_FORMAT(e.date_of_joining,'%Y-%m-%d') AS date_of_joining,
-        e.manager_id,
-        m.name AS manager_name,
-        e.active,
-        CASE WHEN e.active = 1 THEN 'Active' ELSE 'Inactive' END AS status
-      FROM employees e
-      JOIN users u ON u.id = e.user_id
-      LEFT JOIN employees m ON m.id = e.manager_id
-      WHERE e.user_id = ?
-      LIMIT 1
-      `,
-      [req.user.id]
-    );
+    const emp = await getEmployeeByUser(req.user.id);
 
-    if (!rows.length) {
-      return res.status(404).json({ message: "Employee not found" });
+    let managerName = null;
+    if (emp.manager_id) {
+      const mgr = await databases.getDocument(
+        DB_ID,
+        EMP_COL,
+        emp.manager_id
+      );
+      managerName = mgr.name;
     }
 
-    res.json(rows[0]);
+    res.json({
+      id: emp.$id,
+      name: emp.name,
+      email: emp.email,
+      employment_type: emp.employment_type,
+      role: req.user.role,
+      department: emp.department,
+      client_name: emp.client_name,
+      work_location: emp.work_location,
+      designation: emp.designation,
+      date_of_joining: emp.date_of_joining?.slice(0, 10),
+      manager_id: emp.manager_id,
+      manager_name: managerName,
+      active: emp.active,
+      status: emp.active ? "Active" : "Inactive"
+    });
 
   } catch (err) {
-    console.error("GET /employees/me ERROR:", err);
-    res.status(500).json({ message: "DB error" });
+    console.error("GET /employees/me ERROR:", err.message);
+    res.status(404).json({ message: "Employee not found" });
   }
 });
 
 /* =========================
-   GET MY TIMELINE (CAREER)
+   MY TIMELINE
 ========================= */
 router.get("/me/timeline", verifyToken, async (req, res) => {
   try {
-    const employeeId = await getEmployeeIdByUser(req.user.id);
+    const emp = await getEmployeeByUser(req.user.id);
     const timeline = [];
 
-    // JOIN DATE
-    const [[emp]] = await db.query(
-      `
-      SELECT DATE_FORMAT(date_of_joining,'%Y-%m-%d') AS join_date
-      FROM employees
-      WHERE id = ?
-      `,
-      [employeeId]
-    );
-
-    if (emp?.join_date) {
+    if (emp.date_of_joining) {
       timeline.push({
         label: "Joined LovasIT",
-        date: emp.join_date
+        date: emp.date_of_joining.slice(0, 10)
       });
     }
 
-    // ROLE HISTORY
-    const [history] = await db.query(
-      `
-      SELECT
-        old_designation,
-        new_designation,
-        DATE_FORMAT(changed_at,'%Y-%m-%d') AS date
-      FROM employee_role_history
-      WHERE employee_id = ?
-      ORDER BY changed_at
-      `,
-      [employeeId]
+    const history = await databases.listDocuments(
+      DB_ID,
+      ROLE_HISTORY_COL,
+      [
+        Query.equal("employee_id", emp.$id),
+        Query.orderAsc("changed_at")
+      ]
     );
 
-    history.forEach(h => {
+    history.documents.forEach(h => {
       timeline.push({
         label: `Designation changed from ${h.old_designation} to ${h.new_designation}`,
-        date: h.date
+        date: h.changed_at.slice(0, 10)
       });
     });
 
     res.json(timeline);
 
   } catch (err) {
-    console.error("ME TIMELINE ERROR:", err);
-    res.json([]); // fail-safe for Me page
+    console.error("ME TIMELINE ERROR:", err.message);
+    res.json([]);
   }
 });
 
@@ -202,49 +200,24 @@ router.get("/:id", verifyToken, async (req, res) => {
   }
 
   try {
-    let sql = `
-      SELECT
-        e.id,
-        e.name,
-        u.email,
-        e.employment_type,
-        u.role,
-        u.profile_photo,
-        e.department,
-        e.client_name,
-        e.work_location,
-        e.designation,
-        DATE_FORMAT(e.date_of_joining,'%Y-%m-%d') AS date_of_joining,
-        e.manager_id,
-        m.name AS manager_name,
-        e.active,
-        CASE WHEN e.active = 1 THEN 'Active' ELSE 'Inactive' END AS status
-      FROM employees e
-      JOIN users u ON u.id = e.user_id
-      LEFT JOIN employees m ON m.id = e.manager_id
-      WHERE e.id = ?
-    `;
-    const params = [req.params.id];
+    const emp = await databases.getDocument(
+      DB_ID,
+      EMP_COL,
+      req.params.id
+    );
 
     if (role === "manager") {
-      const managerEmpId = await getEmployeeIdByUser(req.user.id);
-      sql += " AND e.manager_id = ?";
-      params.push(managerEmpId);
+      const mgr = await getEmployeeByUser(req.user.id);
+      if (emp.manager_id !== mgr.$id) {
+        return res.status(404).json({ message: "Employee not found" });
+      }
     }
 
-    sql += " LIMIT 1";
-
-    const [rows] = await db.query(sql, params);
-
-    if (!rows.length) {
-      return res.status(404).json({ message: "Employee not found" });
-    }
-
-    res.json(rows[0]);
+    res.json(emp);
 
   } catch (err) {
-    console.error("GET /employees/:id ERROR:", err);
-    res.status(500).json({ message: "DB error" });
+    console.error("GET EMPLOYEE ERROR:", err.message);
+    res.status(404).json({ message: "Employee not found" });
   }
 });
 
@@ -258,49 +231,41 @@ router.get("/:id/timeline", verifyToken, async (req, res) => {
   }
 
   try {
-    const employeeId = req.params.id;
-    const timeline = [];
-
-    const [[join]] = await db.query(
-      `
-      SELECT DATE_FORMAT(date_of_joining,'%Y-%m-%d') AS join_date
-      FROM employees
-      WHERE id = ?
-      `,
-      [employeeId]
+    const emp = await databases.getDocument(
+      DB_ID,
+      EMP_COL,
+      req.params.id
     );
 
-    if (join?.join_date) {
+    const timeline = [];
+
+    if (emp.date_of_joining) {
       timeline.push({
         label: "Joined LovasIT",
-        date: join.join_date
+        date: emp.date_of_joining.slice(0, 10)
       });
     }
 
-    const [history] = await db.query(
-      `
-      SELECT
-        old_designation,
-        new_designation,
-        DATE_FORMAT(changed_at,'%Y-%m-%d') AS date
-      FROM employee_role_history
-      WHERE employee_id = ?
-      ORDER BY changed_at
-      `,
-      [employeeId]
+    const history = await databases.listDocuments(
+      DB_ID,
+      ROLE_HISTORY_COL,
+      [
+        Query.equal("employee_id", emp.$id),
+        Query.orderAsc("changed_at")
+      ]
     );
 
-    history.forEach(h => {
+    history.documents.forEach(h => {
       timeline.push({
         label: `Designation changed from ${h.old_designation} to ${h.new_designation}`,
-        date: h.date
+        date: h.changed_at.slice(0, 10)
       });
     });
 
     res.json(timeline);
 
   } catch (err) {
-    console.error("EMPLOYEE TIMELINE ERROR:", err);
+    console.error("EMP TIMELINE ERROR:", err.message);
     res.json([]);
   }
 });
@@ -314,50 +279,52 @@ router.put("/:id/role", verifyToken, async (req, res) => {
     return res.status(403).json({ message: "Forbidden" });
   }
 
-  const employeeId = req.params.id;
   const { newDesignation } = req.body;
-
   if (!newDesignation) {
     return res.status(400).json({ message: "New designation required" });
   }
 
   try {
-    const [[emp]] = await db.query(
-      "SELECT designation FROM employees WHERE id = ?",
-      [employeeId]
+    const emp = await databases.getDocument(
+      DB_ID,
+      EMP_COL,
+      req.params.id
     );
-
-    if (!emp) {
-      return res.status(404).json({ message: "Employee not found" });
-    }
 
     if (emp.designation === newDesignation) {
       return res.status(400).json({ message: "No change detected" });
     }
 
-    await db.query(
-      "UPDATE employees SET designation = ? WHERE id = ?",
-      [newDesignation, employeeId]
+    await databases.updateDocument(
+      DB_ID,
+      EMP_COL,
+      emp.$id,
+      { designation: newDesignation }
     );
 
-    await db.query(
-      `
-      INSERT INTO employee_role_history
-        (employee_id, old_designation, new_designation, changed_by, changed_at)
-      VALUES (?, ?, ?, ?, NOW())
-      `,
-      [employeeId, emp.designation, newDesignation, req.user.id]
+    await databases.createDocument(
+      DB_ID,
+      ROLE_HISTORY_COL,
+      "unique()",
+      {
+        employee_id: emp.$id,
+        old_designation: emp.designation,
+        new_designation: newDesignation,
+        changed_by: req.user.id,
+        changed_at: new Date().toISOString()
+      }
     );
 
     res.json({ message: "Role updated successfully" });
 
   } catch (err) {
-    console.error("ROLE UPDATE ERROR:", err);
+    console.error("ROLE UPDATE ERROR:", err.message);
     res.status(500).json({ message: "Update failed" });
   }
 });
 
 module.exports = router;
+
 /* ======================================================
-   END routes/employee.js
+   END routes/employee.js (APPWRITE)
 ====================================================== */

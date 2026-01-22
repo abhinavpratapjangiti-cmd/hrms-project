@@ -3,21 +3,24 @@ const jwt = require("jsonwebtoken");
 const JWT_SECRET = process.env.JWT_SECRET;
 
 if (!JWT_SECRET) {
-  throw new Error("JWT_SECRET is not defined");
+  throw new Error("JWT_SECRET missing");
 }
 
-function verifyToken(req, res, next) {
+/* =====================================================
+   JWT VERIFICATION MIDDLEWARE (DB-FREE, DEPLOY-SAFE)
+===================================================== */
+async function verifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const token = authHeader.split(" ")[1];
-
   try {
+    const token = authHeader.split(" ")[1];
     const decoded = jwt.verify(token, JWT_SECRET);
 
+    // ✅ Trust JWT claims (Appwrite = data source)
     req.user = {
       id: decoded.id,
       email: decoded.email,
@@ -27,7 +30,6 @@ function verifyToken(req, res, next) {
 
     next();
   } catch (err) {
-    console.error("JWT verification error:", err.message);
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 }

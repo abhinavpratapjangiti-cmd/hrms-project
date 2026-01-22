@@ -1,27 +1,51 @@
-const express = require("express");
-const router = express.Router();
-const db = require("../db");
-const { verifyToken } = require("../middleware/auth");
+const sdk = require("node-appwrite");
 
-/* =========================
-   GET ACTIVE OFFICE LOCATION
-   GET /api/office-locations/active
-========================= */
-router.get("/active", verifyToken, async (req, res) => {
+module.exports = async ({ req, res, log, error }) => {
+  /* =========================
+     APPWRITE CLIENT
+  ========================= */
+  const client = new sdk.Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setJWT(req.headers["x-appwrite-jwt"]);
+
+  const databases = new sdk.Databases(client);
+  const users = new sdk.Users(client);
+
+  const DB_ID = process.env.APPWRITE_DB_ID;
+  const OFFICE_COL = process.env.APPWRITE_OFFICE_LOC_COLLECTION_ID;
+
+  /* =========================
+     AUTH (verifyToken)
+  ========================= */
   try {
-    const [rows] = await db.query(
-      "SELECT * FROM office_locations WHERE active = 1 LIMIT 1"
+    await users.get("me"); // validates JWT
+  } catch {
+    return res.json({ message: "Unauthorized" }, 401);
+  }
+
+  /* =========================
+     ROUTE CHECK
+     GET /office-locations/active
+  ========================= */
+  if (req.method !== "GET" || req.path !== "/office-locations/active") {
+    return res.json({ message: "Route not found" }, 404);
+  }
+
+  try {
+    const result = await databases.listDocuments(
+      DB_ID,
+      OFFICE_COL,
+      [
+        sdk.Query.equal("active", true),
+        sdk.Query.limit(1)
+      ]
     );
 
-    res.json(rows[0] || null);
+    return res.json(result.documents[0] || null);
 
   } catch (err) {
-    console.error("❌ Office location error:", err);
-    res.status(500).json({ message: "DB error" });
+    error(err);
+    return res.json({ message: "DB error" }, 500);
   }
-});
-
-module.exports = router;
-/* =========================
-   END routes/office.js
-========================= */
+};

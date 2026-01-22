@@ -1,221 +1,196 @@
-const express = require("express");
-const router = express.Router();
-const db = require("../db");
-const { verifyToken } = require("../middleware/auth");
-const { pushNotification } = require("./wsServer");
+const sdk = require("node-appwrite");
 
-/* =========================
-   🔔 HELPER: NOTIFICATION
-========================= */
-async function notifyUser(userId, message) {
+module.exports = async ({ req, res, log, error }) => {
+  const client = new sdk.Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setJWT(req.headers["x-appwrite-jwt"]);
+
+  const databases = new sdk.Databases(client);
+  const users = new sdk.Users(client);
+
+  const DB_ID = process.env.APPWRITE_DB_ID;
+  const EMP_COL = process.env.EMP_COLLECTION_ID;
+  const ATT_COL = process.env.ATT_COLLECTION_ID;
+  const LEAVE_COL = process.env.LEAVE_COLLECTION_ID;
+  const TS_COL = process.env.TS_COLLECTION_ID;
+  const NOTIF_COL = process.env.NOTIF_COLLECTION_ID;
+
+  /* =========================
+     AUTH
+  ========================= */
+  let me;
   try {
-    const [result] = await db.query(
-      `
-      INSERT INTO notifications (user_id, type, message, is_read)
-      VALUES (?, 'timesheet', ?, 0)
-      `,
-      [userId, message]
-    );
-
-    // 🔔 REALTIME PUSH (non-blocking)
-    pushNotification(userId, {
-      id: result.insertId,
-      type: "timesheet",
-      message,
-      created_at: new Date()
-    });
-  } catch (err) {
-    console.error("Notify user failed:", err);
-  }
-}
-
-/* =========================
-   MANAGER SUMMARY
-   GET /api/manager/summary
-========================= */
-router.get("/summary", verifyToken, async (req, res) => {
-  if (req.user.role !== "manager") {
-    return res.status(403).json({ message: "Forbidden" });
+    me = await users.get("me");
+  } catch {
+    return res.json({ message: "Unauthorized" }, 401);
   }
 
-  const managerEmpId = req.user.employee_id;
-  if (!managerEmpId) {
-    return res.status(400).json({ message: "Employee mapping missing" });
+  const role = me.prefs?.role;
+  const userId = me.$id;
+
+  /* =========================
+     GET EMPLOYEE RECORD
+  ========================= */
+  const empRes = await databases.listDocuments(
+    DB_ID,
+    EMP_COL,
+    [sdk.Query.equal("user_id", userId)]
+  );
+
+  const employee = empRes.documents[0];
+  if (!employee) {
+    return res.json({ message: "Employee mapping missing" }, 400);
   }
 
-  try {
-    const [[row]] = await db.query(
-      `
-      SELECT
-        COALESCE((
-          SELECT COUNT(DISTINCT a.employee_id)
-          FROM attendance a
-          JOIN employees e ON e.id = a.employee_id
-          WHERE DATE(a.created_at) = CURDATE()
-            AND e.manager_id = ?
-        ), 0) AS present,
+  const empId = employee.employee_id;
 
-        COALESCE((
-          SELECT COUNT(*)
-          FROM employees
-          WHERE manager_id = ?
-        ), 0) AS total,
-
-        COALESCE((
-          SELECT COUNT(DISTINCT l.employee_id)
-          FROM leaves l
-          JOIN employees e ON e.id = l.employee_id
-          WHERE l.status = 'Approved'
-            AND CURDATE() BETWEEN l.from_date AND l.to_date
-            AND e.manager_id = ?
-        ), 0) AS on_leave,
-
-        COALESCE((
-          SELECT COUNT(*)
-          FROM timesheets t
-          JOIN employees e ON e.id = t.employee_id
-          WHERE t.status = 'Submitted'
-            AND e.manager_id = ?
-        ), 0) AS pending_timesheets
-      `,
-      [managerEmpId, managerEmpId, managerEmpId, managerEmpId]
-    );
-
-    res.json(row);
-
-  } catch (err) {
-    console.error("Manager summary error:", err);
-    res.status(500).json({ message: "Summary failed" });
-  }
-});
-
-/* =========================
-   PENDING TIMESHEETS
-   GET /api/manager/timesheets/pending
-========================= */
-router.get("/timesheets/pending", verifyToken, async (req, res) => {
-  if (!["manager", "hr", "admin"].includes(req.user.role)) {
-    return res.status(403).json({ message: "Forbidden" });
-  }
+  const route = `${req.method} ${req.path}`;
 
   try {
-    // HR / Admin → all
-    if (req.user.role !== "manager") {
-      const [rows] = await db.query(
-        `
-        SELECT
-          t.id,
-          t.work_date,
-          t.hours,
-          e.name AS employee
-        FROM timesheets t
-        JOIN employees e ON e.id = t.employee_id
-        WHERE t.status = 'Submitted'
-        ORDER BY t.work_date DESC
-        `
+
+    /* =========================
+       MANAGER SUMMARY
+       GET /manager/summary
+    ========================= */
+    if (route === "GET /manager/summary") {
+      if (role !== "manager") {
+        return res.json({ message: "Forbidden" }, 403);
+      }
+
+      const today = new Date().toISOString().slice(0, 10);
+
+      const present = await databases.listDocuments(
+        DB_ID,
+        ATT_COL,
+        [
+          sdk.Query.equal("manager_employee_id", empId),
+          sdk.Query.equal("date", today)
+        ]
       );
-      return res.json(rows);
+
+      const total = await databases.listDocuments(
+        DB_ID,
+        EMP_COL,
+        [sdk.Query.equal("manager_id", empId)]
+      );
+
+      const onLeave = await databases.listDocuments(
+        DB_ID,
+        LEAVE_COL,
+        [
+          sdk.Query.equal("manager_employee_id", empId),
+          sdk.Query.equal("status", "Approved"),
+          sdk.Query.lessThanEqual("from_date", today),
+          sdk.Query.greaterThanEqual("to_date", today)
+        ]
+      );
+
+      const pending = await databases.listDocuments(
+        DB_ID,
+        TS_COL,
+        [
+          sdk.Query.equal("manager_employee_id", empId),
+          sdk.Query.equal("status", "Submitted")
+        ]
+      );
+
+      return res.json({
+        present: present.total,
+        total: total.total,
+        on_leave: onLeave.total,
+        pending_timesheets: pending.total
+      });
     }
 
-    // Manager → only reportees
-    const managerEmpId = req.user.employee_id;
-    if (!managerEmpId) {
-      return res.status(400).json({ message: "Employee mapping missing" });
+    /* =========================
+       PENDING TIMESHEETS
+       GET /manager/timesheets/pending
+    ========================= */
+    if (route === "GET /manager/timesheets/pending") {
+      if (!["manager", "hr", "admin"].includes(role)) {
+        return res.json({ message: "Forbidden" }, 403);
+      }
+
+      const queries = [
+        sdk.Query.equal("status", "Submitted"),
+        sdk.Query.orderDesc("work_date")
+      ];
+
+      if (role === "manager") {
+        queries.push(
+          sdk.Query.equal("manager_employee_id", empId)
+        );
+      }
+
+      const ts = await databases.listDocuments(
+        DB_ID,
+        TS_COL,
+        queries
+      );
+
+      return res.json(
+        ts.documents.map(t => ({
+          id: t.$id,
+          work_date: t.work_date,
+          hours: t.hours,
+          employee: t.employee_name
+        }))
+      );
     }
 
-    const [rows] = await db.query(
-      `
-      SELECT
-        t.id,
-        t.work_date,
-        t.hours,
-        e.name AS employee
-      FROM timesheets t
-      JOIN employees e ON e.id = t.employee_id
-      WHERE e.manager_id = ?
-        AND t.status = 'Submitted'
-      ORDER BY t.work_date DESC
-      `,
-      [managerEmpId]
-    );
+    /* =========================
+       APPROVE / REJECT TIMESHEET
+       POST /manager/timesheets/:id/:action
+    ========================= */
+    if (req.method === "POST" && req.path.startsWith("/manager/timesheets/")) {
+      if (!["manager", "hr", "admin"].includes(role)) {
+        return res.json({ message: "Forbidden" }, 403);
+      }
 
-    res.json(rows);
+      const [, , , tsId, action] = req.path.split("/");
+      const status = action === "approve" ? "Approved" : "Rejected";
+
+      const ts = await databases.getDocument(DB_ID, TS_COL, tsId);
+
+      if (role === "manager" && ts.employee_id === empId) {
+        return res.json({ message: "Self approval not allowed" }, 403);
+      }
+
+      if (role === "manager" && ts.manager_employee_id !== empId) {
+        return res.json({ message: "Not your reportee" }, 403);
+      }
+
+      await databases.updateDocument(
+        DB_ID,
+        TS_COL,
+        tsId,
+        {
+          status,
+          approved_by: userId,
+          approved_at: new Date().toISOString()
+        }
+      );
+
+      await databases.createDocument(
+        DB_ID,
+        NOTIF_COL,
+        sdk.ID.unique(),
+        {
+          user_id: ts.employee_user_id,
+          type: "timesheet",
+          message: `Your timesheet for ${ts.work_date} was ${status}`,
+          is_read: false
+        }
+      );
+
+      return res.json({ success: true });
+    }
+
+    return res.json({ message: "Route not found" }, 404);
 
   } catch (err) {
-    res.status(500).json({ message: "DB error" });
+    error(err);
+    return res.json({ message: "Server error" }, 500);
   }
-});
-
-/* =========================
-   APPROVE / REJECT TIMESHEET
-   POST /api/manager/timesheets/:id/:action
-========================= */
-router.post("/timesheets/:id/:action", verifyToken, async (req, res) => {
-  const { id, action } = req.params;
-  const status = action === "approve" ? "Approved" : "Rejected";
-
-  if (!["approve", "reject"].includes(action)) {
-    return res.status(400).json({ message: "Invalid action" });
-  }
-
-  if (!["manager", "hr", "admin"].includes(req.user.role)) {
-    return res.status(403).json({ message: "Forbidden" });
-  }
-
-  const approverEmpId = req.user.employee_id;
-
-  try {
-    const [[ts]] = await db.query(
-      `
-      SELECT
-        t.employee_id,
-        t.work_date,
-        e.manager_id,
-        u.id AS user_id
-      FROM timesheets t
-      JOIN employees e ON e.id = t.employee_id
-      JOIN users u ON u.id = e.user_id
-      WHERE t.id = ?
-      `,
-      [id]
-    );
-
-    if (!ts) {
-      return res.status(404).json({ message: "Timesheet not found" });
-    }
-
-    // ❌ No self approval
-    if (req.user.role === "manager" && ts.employee_id === approverEmpId) {
-      return res.status(403).json({ message: "Self approval not allowed" });
-    }
-
-    // ❌ Manager ownership check
-    if (req.user.role === "manager" && ts.manager_id !== approverEmpId) {
-      return res.status(403).json({ message: "Not your reportee" });
-    }
-
-    await db.query(
-      `
-      UPDATE timesheets
-      SET status = ?, approved_by = ?, approved_at = NOW()
-      WHERE id = ?
-      `,
-      [status, req.user.id, id]
-    );
-
-    await notifyUser(
-      ts.user_id,
-      `Your timesheet for ${ts.work_date} was ${status}`
-    );
-
-    res.json({ success: true });
-
-  } catch (err) {
-    res.status(500).json({ message: "DB error" });
-  }
-});
-
-module.exports = router;
-/* ======================================================      
-    END routes/manager.js       
-====================================================== */
+};

@@ -1,110 +1,125 @@
-const express = require("express");
-const router = express.Router();
-const db = require("../db");
-const { verifyToken } = require("../middleware/auth");
+const sdk = require("node-appwrite");
 
-/* =========================
-   🔔 GET UNREAD NOTIFICATIONS ONLY
-   Bell + dropdown
-   GET /api/notifications
-========================= */
-router.get("/", verifyToken, async (req, res) => {
+module.exports = async ({ req, res, log, error }) => {
+  /* =========================
+     APPWRITE CLIENT
+  ========================= */
+  const client = new sdk.Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setJWT(req.headers["x-appwrite-jwt"]);
+
+  const databases = new sdk.Databases(client);
+  const users = new sdk.Users(client);
+
+  const DB_ID = process.env.APPWRITE_DB_ID;
+  const COL_ID = process.env.APPWRITE_NOTIFICATION_COLLECTION_ID;
+
+  /* =========================
+     AUTH (verifyToken replacement)
+  ========================= */
+  let me;
   try {
-    const [rows] = await db.query(
-      `
-      SELECT id, type, message, created_at
-      FROM notifications
-      WHERE user_id = ?
-        AND is_read = 0
-      ORDER BY created_at DESC
-      LIMIT 20
-      `,
-      [req.user.id]
-    );
+    me = await users.get("me");
+  } catch {
+    return res.json([], 401);
+  }
 
-    res.json(rows);
+  const userId = me.$id;
+  const route = `${req.method} ${req.path}`;
+
+  try {
+
+    /* =========================
+       🔔 GET UNREAD NOTIFICATIONS
+       GET /notifications
+    ========================= */
+    if (route === "GET /notifications") {
+      const result = await databases.listDocuments(DB_ID, COL_ID, [
+        sdk.Query.equal("user_id", userId),
+        sdk.Query.equal("is_read", false),
+        sdk.Query.orderDesc("created_at"),
+        sdk.Query.limit(20)
+      ]);
+
+      return res.json(result.documents || []);
+    }
+
+    /* =========================
+       📥 UNREAD COUNT
+       GET /notifications/inbox/count
+    ========================= */
+    if (route === "GET /notifications/inbox/count") {
+      const result = await databases.listDocuments(DB_ID, COL_ID, [
+        sdk.Query.equal("user_id", userId),
+        sdk.Query.equal("is_read", false),
+        sdk.Query.limit(1) // count only
+      ]);
+
+      return res.json({ count: result.total || 0 });
+    }
+
+    /* =========================
+       ✅ MARK ALL AS READ
+       PUT /notifications/read-all
+    ========================= */
+    if (route === "PUT /notifications/read-all") {
+      const result = await databases.listDocuments(DB_ID, COL_ID, [
+        sdk.Query.equal("user_id", userId),
+        sdk.Query.equal("is_read", false),
+        sdk.Query.limit(100)
+      ]);
+
+      await Promise.allSettled(
+        result.documents.map(doc =>
+          databases.updateDocument(
+            DB_ID,
+            COL_ID,
+            doc.$id,
+            { is_read: true }
+          )
+        )
+      );
+
+      return res.json({ success: true });
+    }
+
+    /* =========================
+       ✅ MARK SINGLE AS READ
+       PUT /notifications/:id/read
+    ========================= */
+    if (
+      req.method === "PUT" &&
+      req.path.startsWith("/notifications/") &&
+      req.path.endsWith("/read")
+    ) {
+      const [, , notifId] = req.path.split("/");
+
+      const doc = await databases.getDocument(
+        DB_ID,
+        COL_ID,
+        notifId
+      );
+
+      // 🔐 ownership check
+      if (doc.user_id !== userId) {
+        return res.json({ success: false }, 403);
+      }
+
+      await databases.updateDocument(
+        DB_ID,
+        COL_ID,
+        notifId,
+        { is_read: true }
+      );
+
+      return res.json({ success: true });
+    }
+
+    return res.json({ message: "Route not found" }, 404);
 
   } catch (err) {
-    console.error("❌ Notifications error:", err);
-    res.status(500).json([]);
+    error(err);
+    return res.json({ success: false }, 500);
   }
-});
-
-/* =========================
-   📥 UNREAD COUNT (BELL + HOME INBOX)
-   GET /api/notifications/inbox/count
-========================= */
-router.get("/inbox/count", verifyToken, async (req, res) => {
-  try {
-    const [[row]] = await db.query(
-      `
-      SELECT COUNT(*) AS count
-      FROM notifications
-      WHERE user_id = ?
-        AND (is_read = 0 OR is_read IS NULL)
-      `,
-      [req.user.id]
-    );
-
-    res.json({ count: row.count });
-
-  } catch (err) {
-    console.error("❌ Inbox count error:", err);
-    res.json({ count: 0 });
-  }
-});
-
-/* =========================
-   ✅ MARK ALL AS READ
-   PUT /api/notifications/read-all
-========================= */
-router.put("/read-all", verifyToken, async (req, res) => {
-  try {
-    await db.query(
-      `
-      UPDATE notifications
-      SET is_read = 1
-      WHERE user_id = ?
-        AND is_read = 0
-      `,
-      [req.user.id]
-    );
-
-    res.json({ success: true });
-
-  } catch (err) {
-    console.error("❌ Read-all error:", err);
-    res.status(500).json({ success: false });
-  }
-});
-
-/* =========================
-   ✅ MARK SINGLE AS READ
-   PUT /api/notifications/:id/read
-========================= */
-router.put("/:id/read", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    await db.query(
-      `
-      UPDATE notifications
-      SET is_read = 1
-      WHERE id = ?
-        AND user_id = ?
-      `,
-      [id, req.user.id]
-    );
-
-    res.json({ success: true });
-
-  } catch (err) {
-    console.error("❌ Mark-read error:", err);
-    res.status(500).json({ success: false });
-  }
-});
-
-module.exports = router;
-/* ======================================================       
-    END routes/notifications.js       
-====================================================== */
+};

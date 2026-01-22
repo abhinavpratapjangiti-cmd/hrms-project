@@ -1,34 +1,38 @@
 /* =====================================================
-   dashboard.js — FINAL, ZIP-ALIGNED, SPA-SAFE
+   dashboard.js — APPWRITE SPA SAFE (PROD)
 ===================================================== */
 
-(function () {
-  if (window.__dashboardLoaded) return;
-  window.__dashboardLoaded = true;
-  console.log("dashboard.js loaded");
-})();
+import { Client, Account, Functions } from "https://cdn.jsdelivr.net/npm/appwrite@14.0.0/+esm";
 
-/* ================= AUTH ================= */
-function authHeaders() {
-  const token = localStorage.getItem("token");
-  if (!token) return null;
-  return { Authorization: "Bearer " + token };
-}
+/* ================= APPWRITE INIT ================= */
+const client = new Client()
+  .setEndpoint("https://cloud.appwrite.io/v1")
+  .setProject("APPWRITE_PROJECT_ID");
 
-/* ================= SAFE FETCH ================= */
-function safeFetch(url) {
-  const headers = authHeaders();
-  if (!headers) return Promise.resolve(null);
+const account = new Account(client);
+const functions = new Functions(client);
 
-  return fetch(url, { headers })
-    .then(r => (r.ok ? r.json() : null))
-    .catch(() => null);
+/* ================= SAFE FUNCTION CALL ================= */
+async function callFunction(fnName, path, payload = null) {
+  try {
+    const res = await functions.createExecution(
+      fnName,
+      JSON.stringify({ path, payload })
+    );
+
+    return JSON.parse(res.response || "{}");
+  } catch (e) {
+    console.warn("Function failed:", fnName, path);
+    return null;
+  }
 }
 
 /* ================= HOME LIFECYCLE ================= */
-window.onHomeRendered = function () {
-  if (!authHeaders()) {
-    console.warn("No token, dashboard APIs skipped");
+window.onHomeRendered = async function () {
+  try {
+    await account.get(); // ensures logged-in session
+  } catch {
+    console.warn("Not logged in — dashboard skipped");
     return;
   }
 
@@ -42,9 +46,9 @@ window.onHomeRendered = function () {
 };
 
 /* ================= ROLE BASED ================= */
-function applyRoleBasedDashboards() {
-  const user = JSON.parse(localStorage.getItem("user") || "{}");
-  const role = (user.role || "").toLowerCase();
+async function applyRoleBasedDashboards() {
+  const user = await account.get();
+  const role = (user.prefs?.role || "").toLowerCase();
   const isManager = ["manager", "hr", "admin"].includes(role);
 
   if (!isManager) return;
@@ -57,21 +61,7 @@ function applyRoleBasedDashboards() {
 
 /* ================= MANAGER STATS ================= */
 function loadManagerStats() {
-  loadTeamAttendanceSummary();
-
-  safeFetch("/api/leaves/pending/my-team")
-    .then(d => setText("pendingLeavesCount", d?.count ?? 0));
-
-  safeFetch("/api/timesheets/pending/my-team")
-    .then(d => setText("pendingTimesheetsCount", d?.count ?? 0));
-
-  safeFetch("/api/leaves/team/on-leave")
-    .then(d => setText("teamOnLeave", d?.count ?? 0));
-}
-
-/* ================= TEAM ATTENDANCE SUMMARY ================= */
-function loadTeamAttendanceSummary() {
-  safeFetch("/api/attendance/team/summary")
+  callFunction("dashboard", "/attendance/team/summary")
     .then(d => {
       const present = d?.present ?? 0;
       const total = d?.total ?? 0;
@@ -85,47 +75,17 @@ function loadTeamAttendanceSummary() {
       );
       setText("teamOnLeave", onLeave);
     });
-}
 
-/* ================= TEAM ATTENDANCE MODAL ================= */
-function openTeamAttendanceModal(filter) {
-  const modal = document.getElementById("teamAttendanceModal");
-  const tbody = document.getElementById("teamAttendanceTable");
-  if (!modal || !tbody) return;
+  callFunction("dashboard", "/leaves/pending/my-team")
+    .then(d => setText("pendingLeavesCount", d?.count ?? 0));
 
-  tbody.innerHTML =
-    "<tr><td colspan='4' class='text-center text-muted'>Loading…</td></tr>";
-
-  safeFetch("/api/attendance/team/today/details")
-    .then(rows => {
-      if (!Array.isArray(rows)) rows = [];
-
-      if (filter === "ON_LEAVE") {
-        rows = rows.filter(r => r.status === "ON_LEAVE");
-      }
-
-      if (!rows.length) {
-        tbody.innerHTML =
-          "<tr><td colspan='4' class='text-center text-muted'>No data</td></tr>";
-        return;
-      }
-
-      tbody.innerHTML = rows.map(r => `
-        <tr>
-          <td>${r.employee_name || "—"}</td>
-          <td>${r.status || "—"}</td>
-          <td>${r.clock_in ? formatTime(r.clock_in) : "—"}</td>
-          <td>${r.clock_out ? formatTime(r.clock_out) : "—"}</td>
-        </tr>
-      `).join("");
-    });
-
-  new bootstrap.Modal(modal).show();
+  callFunction("dashboard", "/timesheets/pending/my-team")
+    .then(d => setText("pendingTimesheetsCount", d?.count ?? 0));
 }
 
 /* ================= TODAY TIME ================= */
 function loadTodayTime() {
-  safeFetch("/api/attendance/today")
+  callFunction("attendance", "/today")
     .then(d => {
       setText(
         "workedTime",
@@ -157,7 +117,7 @@ function resetHolidayCard() {
 }
 
 function loadHoliday() {
-  safeFetch("/api/holiday/nearest")
+  callFunction("holiday", "/nearest")
     .then(h => {
       if (!h) return;
       document.getElementById("holidayCard")?.classList.remove("d-none");
@@ -166,9 +126,8 @@ function loadHoliday() {
     });
 }
 
-/* ================= OTHER ================= */
 function loadUpcomingHolidays() {
-  safeFetch("/api/holiday")
+  callFunction("holiday", "/list")
     .then(rows => {
       if (!Array.isArray(rows)) rows = [];
       document.getElementById("upcomingHolidays").innerHTML =
@@ -178,13 +137,17 @@ function loadUpcomingHolidays() {
     });
 }
 
+/* ================= THOUGHT ================= */
 function loadThoughtOfTheDay() {
-  safeFetch("/api/thought/today")
-    .then(d => setText("thoughtText", d?.text || "Have a productive day."));
+  callFunction("thought", "/today")
+    .then(d =>
+      setText("thoughtText", d?.thought || "Have a productive day.")
+    );
 }
 
+/* ================= LEAVES ================= */
 function loadLeaveBalance() {
-  safeFetch("/api/leaves/balance")
+  callFunction("leaves", "/balance")
     .then(rows => {
       if (!Array.isArray(rows)) rows = [];
       document.getElementById("leaveBalanceBox").innerHTML =
@@ -226,5 +189,5 @@ function secToHHMM(sec) {
 }
 
 /* =====================================================
-   END dashboard.js
+   END dashboard.js (APPWRITE)
 ===================================================== */
